@@ -17,13 +17,11 @@ image = (
         "huggingface-hub==0.36.0",
         "readability-lxml", "lxml[html_clean]",
     )
+    .add_local_file("lib.py", "/root/lib.py")
 )
 
 hf_cache_vol = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
 vllm_cache_vol = modal.Volume.from_name("vllm-cache", create_if_missing=True)
-
-
-from lib import fix_headings, postprocess
 
 
 @app.cls(
@@ -132,6 +130,7 @@ class ReaderLM:
         import re as _re
         result = _re.sub(r"^```\s*(?:markdown)?\s*\n?", "", result)
         result = _re.sub(r"\n?```\s*$", "", result)
+        from lib import fix_headings, postprocess
         result = fix_headings(cleaned_html, result)
         result = postprocess(result)
         return result

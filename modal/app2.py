@@ -4,13 +4,14 @@ Modal app using Jina Reader for URL-to-Markdown conversion (CPU only).
 
 import modal
 
-from lib import fix_headings, postprocess
-
 MINUTES = 60
 
 app = modal.App("browser2")
 
-image = modal.Image.debian_slim(python_version="3.12")
+image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .add_local_file("lib.py", "/root/lib.py")
+)
 
 
 def _clean_html(html: str) -> str:
@@ -175,6 +176,7 @@ class ReaderLM:
             raw = resp.read().decode("utf-8")
         t_fetch = time.perf_counter()
 
+        from lib import fix_headings, postprocess
         cleaned = clean_jina_output(raw)
         cleaned = fix_headings(_clean_html(raw_html), cleaned)
         result = postprocess(cleaned)
