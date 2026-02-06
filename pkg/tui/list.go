@@ -88,7 +88,6 @@ func renderArticleItem(meta storage.ArticleMeta, selected bool, width int, style
 	var sb strings.Builder
 
 	titleWidth := width - 4 // Account for selection marker and padding
-	descWidth := width - 4
 
 	title := truncateString(meta.Title, titleWidth)
 	if title == "" {
@@ -107,7 +106,17 @@ func renderArticleItem(meta storage.ArticleMeta, selected bool, width int, style
 	if meta.FileSize > 0 {
 		descParts = append(descParts, formatFileSize(meta.FileSize))
 	}
-	desc := truncateString(strings.Join(descParts, " · "), descWidth)
+	desc := strings.Join(descParts, " · ")
+
+	// Render tags as styled chips
+	var tagStr string
+	if len(meta.Tags) > 0 {
+		var tags []string
+		for _, t := range meta.Tags {
+			tags = append(tags, styles.Tag.Render("#"+t))
+		}
+		tagStr = " " + strings.Join(tags, " ")
+	}
 
 	if selected {
 		sb.WriteString(styles.SelectionMarker.Render(""))
@@ -115,12 +124,14 @@ func renderArticleItem(meta storage.ArticleMeta, selected bool, width int, style
 		sb.WriteString("\n")
 		sb.WriteString("  ")
 		sb.WriteString(styles.SelectedDesc.Render(desc))
+		sb.WriteString(tagStr)
 	} else {
 		sb.WriteString("  ")
 		sb.WriteString(styles.ListItemTitle.Render(title))
 		sb.WriteString("\n")
 		sb.WriteString("  ")
 		sb.WriteString(styles.ListItemDesc.Render(desc))
+		sb.WriteString(tagStr)
 	}
 
 	return sb.String()

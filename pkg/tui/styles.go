@@ -31,6 +31,9 @@ type Styles struct {
 	Success lipgloss.Style
 	Muted   lipgloss.Style
 
+	// Tag styles
+	Tag lipgloss.Style
+
 	// Search styles
 	SearchBox     lipgloss.Style
 	SearchPrompt  lipgloss.Style
@@ -49,10 +52,11 @@ func DefaultStyles() Styles {
 	body := lipgloss.AdaptiveColor{Light: string(base00), Dark: string(base0)}
 	emphasis := lipgloss.AdaptiveColor{Light: string(base00), Dark: string(base1)}
 
-	// Solarized accents — yellow as the single focus color
+	// Solarized accents
 	yellow := lipgloss.Color("#b58900")
 	orange := lipgloss.Color("#cb4b16")
 	green := lipgloss.Color("#859900")
+	cyan := lipgloss.Color("#2aa198")
 
 	return Styles{
 		App: lipgloss.NewStyle().
@@ -121,6 +125,9 @@ func DefaultStyles() Styles {
 
 		Muted: lipgloss.NewStyle().
 			Foreground(subtle),
+
+		Tag: lipgloss.NewStyle().
+			Foreground(cyan),
 
 		SearchBox: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).

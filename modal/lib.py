@@ -218,7 +218,7 @@ def postprocess(markdown: str) -> str:
                     wl = wl.replace(key, original)
                 wrapped[i] = wl
             wrapped_lines.extend(wrapped)
-    markdown = "\n".join(wrapped_lines)
+    markdown = "\n".join(line.rstrip() for line in wrapped_lines)
 
     # Final trim.
     markdown = markdown.strip() + "\n"
