@@ -1,10 +1,8 @@
 package storage
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +10,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/irfansharif/browser/pkg/images"
 )
 
 // Article represents a saved article with its content.
@@ -20,37 +20,26 @@ type Article struct {
 	Content string
 }
 
-// ArticleMeta represents article metadata stored in the index.
+// ArticleMeta represents article metadata parsed from markdown front matter.
 type ArticleMeta struct {
-	ID           string    `json:"id"`
-	Title        string    `json:"title"`
-	Author       string    `json:"author"`
-	SourceURL    string    `json:"source_url"`
-	SourceDomain string    `json:"source_domain"`
-	SavedAt      time.Time `json:"saved_at"`
-	FilePath     string    `json:"file_path"`
-	FileSize     int64     `json:"file_size"`
-	Tags         []string  `json:"tags"`
-}
-
-// Index represents the article index.
-type Index struct {
-	Articles []ArticleMeta `json:"articles"`
+	Title        string
+	Author       string
+	SourceURL    string
+	SourceDomain string    // derived from SourceURL
+	SavedAt      time.Time
+	FilePath     string // relative path, derived from disk
+	FileSize     int64  // derived from os.Stat
 }
 
 // Store manages article storage.
 type Store struct {
-	basePath  string
-	indexPath string
-	index     *Index
+	basePath string
+	articles []ArticleMeta // cached from scanning articles/ dir
 }
 
 // New creates a new Store at the given base path.
 func New(basePath string) (*Store, error) {
-	s := &Store{
-		basePath:  basePath,
-		indexPath: filepath.Join(basePath, "index.json"),
-	}
+	s := &Store{basePath: basePath}
 
 	// Ensure directories exist
 	articlesDir := filepath.Join(basePath, "articles")
@@ -58,144 +47,189 @@ func New(basePath string) (*Store, error) {
 		return nil, fmt.Errorf("creating articles directory: %w", err)
 	}
 
-	// Load or create index
-	if err := s.loadIndex(); err != nil {
-		return nil, fmt.Errorf("loading index: %w", err)
+	// Scan existing articles
+	if err := s.scan(); err != nil {
+		return nil, fmt.Errorf("scanning articles: %w", err)
 	}
 
 	return s, nil
 }
 
-func (s *Store) loadIndex() error {
-	data, err := os.ReadFile(s.indexPath)
-	if os.IsNotExist(err) {
-		s.index = &Index{Articles: []ArticleMeta{}}
-		return nil
-	}
+func (s *Store) scan() error {
+	articlesDir := filepath.Join(s.basePath, "articles")
+	entries, err := os.ReadDir(articlesDir)
 	if err != nil {
 		return err
 	}
 
-	s.index = &Index{}
-	return json.Unmarshal(data, s.index)
-}
+	s.articles = nil
+	for _, entry := range entries {
+		if entry.IsDir() {
+			// Directory format: look for index.md inside.
+			indexPath := filepath.Join(articlesDir, entry.Name(), "index.md")
+			content, err := os.ReadFile(indexPath)
+			if err != nil {
+				continue
+			}
 
-func (s *Store) saveIndex() error {
-	data, err := json.MarshalIndent(s.index, "", "  ")
-	if err != nil {
-		return err
+			title, author, source, saved, _, err := parseFrontMatter(string(content))
+			if err != nil {
+				continue
+			}
+
+			relPath := filepath.Join("articles", entry.Name(), "index.md")
+			dirPath := filepath.Join(articlesDir, entry.Name())
+
+			meta := ArticleMeta{
+				Title:     title,
+				Author:    author,
+				SourceURL: source,
+				SavedAt:   saved,
+				FilePath:  relPath,
+				FileSize:  calcDirSize(dirPath),
+			}
+			if source != "" {
+				if parsed, err := url.Parse(source); err == nil {
+					meta.SourceDomain = parsed.Host
+				}
+			}
+			s.articles = append(s.articles, meta)
+		} else if strings.HasSuffix(entry.Name(), ".md") {
+			// Flat file format (backward compat).
+			relPath := filepath.Join("articles", entry.Name())
+			fullPath := filepath.Join(s.basePath, relPath)
+
+			content, err := os.ReadFile(fullPath)
+			if err != nil {
+				continue
+			}
+
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+
+			title, author, source, saved, _, err := parseFrontMatter(string(content))
+			if err != nil {
+				continue
+			}
+
+			meta := ArticleMeta{
+				Title:     title,
+				Author:    author,
+				SourceURL: source,
+				SavedAt:   saved,
+				FilePath:  relPath,
+				FileSize:  info.Size(),
+			}
+			if source != "" {
+				if parsed, err := url.Parse(source); err == nil {
+					meta.SourceDomain = parsed.Host
+				}
+			}
+			s.articles = append(s.articles, meta)
+		}
 	}
-	return os.WriteFile(s.indexPath, data, 0644)
-}
 
-// Save stores an article and updates the index.
-func (s *Store) Save(article *Article) error {
-	// Generate ID if not set
-	if article.Meta.ID == "" {
-		article.Meta.ID = generateID()
-	}
-
-	// Set saved time
-	if article.Meta.SavedAt.IsZero() {
-		article.Meta.SavedAt = time.Now()
-	}
-
-	// Generate filename
-	filename := generateFilename(article.Meta.SavedAt, article.Meta.Title)
-	article.Meta.FilePath = filepath.Join("articles", filename)
-
-	// Create markdown content with frontmatter
-	content := formatMarkdown(article)
-	article.Meta.FileSize = int64(len(content))
-
-	// Write file
-	fullPath := filepath.Join(s.basePath, article.Meta.FilePath)
-	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
-		return fmt.Errorf("writing article file: %w", err)
-	}
-
-	// Update index
-	s.index.Articles = append(s.index.Articles, article.Meta)
-	if err := s.saveIndex(); err != nil {
-		// Try to clean up the file
-		os.Remove(fullPath)
-		return fmt.Errorf("saving index: %w", err)
-	}
+	sort.Slice(s.articles, func(i, j int) bool {
+		return s.articles[i].SavedAt.After(s.articles[j].SavedAt)
+	})
 
 	return nil
 }
 
+// Save stores an article and updates the cache.
+func (s *Store) Save(article *Article) error {
+	if article.Meta.SavedAt.IsZero() {
+		article.Meta.SavedAt = time.Now()
+	}
+
+	slug := generateDirName(article.Meta.SavedAt, article.Meta.Title)
+	dirPath := filepath.Join(s.basePath, "articles", slug)
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		return fmt.Errorf("creating article directory: %w", err)
+	}
+
+	// Download images and rewrite markdown references.
+	imagesDir := filepath.Join(dirPath, "images")
+	article.Content = images.DownloadAndRewrite(article.Content, imagesDir)
+
+	article.Meta.FilePath = filepath.Join("articles", slug, "index.md")
+	content := formatMarkdown(article)
+
+	indexPath := filepath.Join(dirPath, "index.md")
+	if err := os.WriteFile(indexPath, []byte(content), 0644); err != nil {
+		return fmt.Errorf("writing article file: %w", err)
+	}
+
+	return s.scan()
+}
+
 // List returns all article metadata, sorted by saved date (newest first).
 func (s *Store) List() []ArticleMeta {
-	result := make([]ArticleMeta, len(s.index.Articles))
-	copy(result, s.index.Articles)
-
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].SavedAt.After(result[j].SavedAt)
-	})
-
+	result := make([]ArticleMeta, len(s.articles))
+	copy(result, s.articles)
 	return result
 }
 
-// Get retrieves an article by ID.
-func (s *Store) Get(id string) (*Article, error) {
-	var meta *ArticleMeta
-	for i := range s.index.Articles {
-		if s.index.Articles[i].ID == id {
-			meta = &s.index.Articles[i]
-			break
-		}
-	}
-
-	if meta == nil {
-		return nil, fmt.Errorf("article not found: %s", id)
-	}
-
-	fullPath := filepath.Join(s.basePath, meta.FilePath)
+// Get retrieves an article by its relative file path.
+func (s *Store) Get(filePath string) (*Article, error) {
+	fullPath := filepath.Join(s.basePath, filePath)
 	content, err := os.ReadFile(fullPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading article file: %w", err)
 	}
 
+	title, author, source, saved, body, err := parseFrontMatter(string(content))
+	if err != nil {
+		return nil, fmt.Errorf("parsing front matter: %w", err)
+	}
+
+	meta := ArticleMeta{
+		Title:     title,
+		Author:    author,
+		SourceURL: source,
+		SavedAt:   saved,
+		FilePath:  filePath,
+	}
+	if source != "" {
+		if parsed, err := url.Parse(source); err == nil {
+			meta.SourceDomain = parsed.Host
+		}
+	}
+	if info, err := os.Stat(fullPath); err == nil {
+		meta.FileSize = info.Size()
+	}
+
 	return &Article{
-		Meta:    *meta,
-		Content: string(content),
+		Meta:    meta,
+		Content: body,
 	}, nil
 }
 
-// GetFilePath returns the full file path for an article by ID.
-func (s *Store) GetFilePath(id string) (string, error) {
-	for i := range s.index.Articles {
-		if s.index.Articles[i].ID == id {
-			return filepath.Join(s.basePath, s.index.Articles[i].FilePath), nil
-		}
-	}
-	return "", fmt.Errorf("article not found: %s", id)
+// GetFilePath returns the full file path for an article given its relative path.
+func (s *Store) GetFilePath(relPath string) string {
+	return filepath.Join(s.basePath, relPath)
 }
 
-// Delete removes an article by ID.
-func (s *Store) Delete(id string) error {
-	idx := -1
-	for i := range s.index.Articles {
-		if s.index.Articles[i].ID == id {
-			idx = i
-			break
+// Delete removes an article by its relative file path.
+func (s *Store) Delete(filePath string) error {
+	fullPath := filepath.Join(s.basePath, filePath)
+
+	// Directory format: remove the entire article directory.
+	if strings.HasSuffix(filePath, "/index.md") || strings.HasSuffix(filePath, string(filepath.Separator)+"index.md") {
+		dirPath := filepath.Dir(fullPath)
+		if err := os.RemoveAll(dirPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing article directory: %w", err)
+		}
+	} else {
+		// Flat file format.
+		if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing article file: %w", err)
 		}
 	}
 
-	if idx == -1 {
-		return fmt.Errorf("article not found: %s", id)
-	}
-
-	// Remove file
-	fullPath := filepath.Join(s.basePath, s.index.Articles[idx].FilePath)
-	if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("removing article file: %w", err)
-	}
-
-	// Update index
-	s.index.Articles = append(s.index.Articles[:idx], s.index.Articles[idx+1:]...)
-	return s.saveIndex()
+	return s.scan()
 }
 
 // Search filters articles by query (matches title, author, or domain).
@@ -207,7 +241,7 @@ func (s *Store) Search(query string) []ArticleMeta {
 	query = strings.ToLower(query)
 	var results []ArticleMeta
 
-	for _, meta := range s.index.Articles {
+	for _, meta := range s.articles {
 		if strings.Contains(strings.ToLower(meta.Title), query) ||
 			strings.Contains(strings.ToLower(meta.Author), query) ||
 			strings.Contains(strings.ToLower(meta.SourceDomain), query) {
@@ -224,19 +258,13 @@ func (s *Store) Search(query string) []ArticleMeta {
 
 // Count returns the total number of articles.
 func (s *Store) Count() int {
-	return len(s.index.Articles)
+	return len(s.articles)
 }
 
-func generateID() string {
-	b := make([]byte, 4)
-	rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-func generateFilename(savedAt time.Time, title string) string {
+func generateDirName(savedAt time.Time, title string) string {
 	date := savedAt.Format("2006-01-02")
 	slug := slugify(title)
-	return fmt.Sprintf("%s-%s.md", date, slug)
+	return fmt.Sprintf("%s-%s", date, slug)
 }
 
 func slugify(s string) string {
@@ -301,3 +329,65 @@ func escapeYAML(s string) string {
 	}
 	return s
 }
+
+func parseFrontMatter(content string) (title, author, source string, saved time.Time, body string, err error) {
+	// Front matter is delimited by "---\n" at start and "---\n" to close.
+	parts := strings.SplitN(content, "---\n", 3)
+	if len(parts) < 3 || parts[0] != "" {
+		return "", "", "", time.Time{}, content, nil
+	}
+
+	header := parts[1]
+	body = strings.TrimPrefix(parts[2], "\n")
+
+	for _, line := range strings.Split(header, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		idx := strings.Index(line, ": ")
+		if idx == -1 {
+			continue
+		}
+		key := line[:idx]
+		value := line[idx+2:]
+		value = unescapeYAML(value)
+
+		switch key {
+		case "title":
+			title = value
+		case "author":
+			author = value
+		case "source":
+			source = value
+		case "saved":
+			saved, err = time.Parse(time.RFC3339, value)
+			if err != nil {
+				return "", "", "", time.Time{}, "", fmt.Errorf("parsing saved time: %w", err)
+			}
+		}
+	}
+
+	return
+}
+
+func unescapeYAML(s string) string {
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		s = s[1 : len(s)-1]
+		s = strings.ReplaceAll(s, `\"`, `"`)
+	}
+	return s
+}
+
+func calcDirSize(dir string) int64 {
+	var size int64
+	filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		size += info.Size()
+		return nil
+	})
+	return size
+}
+

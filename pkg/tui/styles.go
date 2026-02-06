@@ -37,12 +37,22 @@ type Styles struct {
 	SearchPlaceholder lipgloss.Style
 }
 
-// DefaultStyles returns the default style configuration.
+// DefaultStyles returns the default style configuration using Solarized colors.
 func DefaultStyles() Styles {
-	subtle := lipgloss.AdaptiveColor{Light: "#666666", Dark: "#888888"}
-	highlight := lipgloss.AdaptiveColor{Light: "#7D56F4", Dark: "#AD8CFF"}
-	special := lipgloss.AdaptiveColor{Light: "#43BF6D", Dark: "#73F59F"}
-	errorColor := lipgloss.AdaptiveColor{Light: "#FF5F5F", Dark: "#FF8888"}
+	// Solarized base tones
+	base01 := lipgloss.Color("#586e75") // comments/secondary
+	base00 := lipgloss.Color("#657b83") // body text (light bg)
+	base0 := lipgloss.Color("#839496")  // body text (dark bg)
+	base1 := lipgloss.Color("#93a1a1")  // emphasized content
+
+	subtle := lipgloss.AdaptiveColor{Light: string(base01), Dark: string(base01)}
+	body := lipgloss.AdaptiveColor{Light: string(base00), Dark: string(base0)}
+	emphasis := lipgloss.AdaptiveColor{Light: string(base00), Dark: string(base1)}
+
+	// Solarized accents — yellow as the single focus color
+	yellow := lipgloss.Color("#b58900")
+	orange := lipgloss.Color("#cb4b16")
+	green := lipgloss.Color("#859900")
 
 	return Styles{
 		App: lipgloss.NewStyle().
@@ -50,7 +60,7 @@ func DefaultStyles() Styles {
 
 		Header: lipgloss.NewStyle().
 			Bold(true).
-			Foreground(highlight).
+			Foreground(emphasis).
 			MarginBottom(1),
 
 		Footer: lipgloss.NewStyle().
@@ -59,13 +69,13 @@ func DefaultStyles() Styles {
 
 		ListTitle: lipgloss.NewStyle().
 			Bold(true).
-			Foreground(highlight),
+			Foreground(emphasis),
 
 		ListItem: lipgloss.NewStyle().
 			PaddingLeft(2),
 
 		ListItemTitle: lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#fafafa"}),
+			Foreground(body),
 
 		ListItemDesc: lipgloss.NewStyle().
 			Foreground(subtle),
@@ -75,50 +85,51 @@ func DefaultStyles() Styles {
 
 		SelectedTitle: lipgloss.NewStyle().
 			Bold(true).
-			Foreground(highlight),
+			Foreground(yellow),
 
 		SelectedDesc: lipgloss.NewStyle().
-			Foreground(highlight),
+			Foreground(body),
 
 		SelectionMarker: lipgloss.NewStyle().
-			Foreground(highlight).
+			Foreground(yellow).
 			SetString("› "),
 
 		InputBox: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(highlight).
-			Padding(1, 2).
-			Width(60),
+			BorderForeground(yellow).
+			Padding(1, 2),
 
 		InputLabel: lipgloss.NewStyle().
 			Bold(true).
-			Foreground(highlight).
+			Foreground(yellow).
 			MarginBottom(1),
 
 		InputField: lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#fafafa"}),
+			Foreground(body),
 
 		InputPrompt: lipgloss.NewStyle().
 			Foreground(subtle),
 
 		Spinner: lipgloss.NewStyle().
-			Foreground(special),
+			Foreground(yellow),
 
 		Error: lipgloss.NewStyle().
-			Foreground(errorColor),
+			Foreground(orange),
 
 		Success: lipgloss.NewStyle().
-			Foreground(special),
+			Foreground(green),
 
 		Muted: lipgloss.NewStyle().
 			Foreground(subtle),
 
 		SearchBox: lipgloss.NewStyle().
-			MarginBottom(1),
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(yellow).
+			Padding(0, 1),
 
 		SearchPrompt: lipgloss.NewStyle().
 			Foreground(subtle).
-			SetString("⊘ "),
+			SetString("⌕ "),
 
 		SearchPlaceholder: lipgloss.NewStyle().
 			Foreground(subtle).
