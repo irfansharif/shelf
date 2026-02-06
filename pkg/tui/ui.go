@@ -93,6 +93,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.urlInput = m.urlInput.SetWidth(msg.Width)
+		m.searchInput = m.searchInput.SetWidth(msg.Width)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -294,11 +296,7 @@ func (m Model) openSelectedArticle() (tea.Model, tea.Cmd) {
 	}
 
 	article := m.articles[m.cursor]
-	filepath, err := m.store.GetFilePath(article.ID)
-	if err != nil {
-		m.err = err
-		return m, nil
-	}
+	fpath := m.store.GetFilePath(article.FilePath)
 
 	editor := os.Getenv("EDITOR")
 	if editor == "" {
@@ -311,7 +309,7 @@ func (m Model) openSelectedArticle() (tea.Model, tea.Cmd) {
 		shell = "/bin/sh"
 	}
 
-	c := exec.Command(shell, "-l", "-c", fmt.Sprintf("%s %q", editor, filepath))
+	c := exec.Command(shell, "-l", "-c", fmt.Sprintf("%s %q", editor, fpath))
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
@@ -327,13 +325,13 @@ func (m Model) deleteSelectedArticle() (tea.Model, tea.Cmd) {
 	}
 
 	article := m.articles[m.cursor]
-	if err := m.store.Delete(article.ID); err != nil {
+	if err := m.store.Delete(article.FilePath); err != nil {
 		m.err = err
 		return m, nil
 	}
 
 	return m, func() tea.Msg {
-		return articleDeletedMsg{id: article.ID}
+		return articleDeletedMsg{id: article.FilePath}
 	}
 }
 
@@ -370,16 +368,31 @@ func (m Model) View() string {
 		sb.WriteString(m.renderList())
 	}
 
-	// Status/error message
-	sb.WriteString("\n")
+	// Status/error message — placed just above the footer help text.
+	var statusLine string
 	if m.err != nil {
-		sb.WriteString(m.styles.Error.Render(fmt.Sprintf("Error: %v", m.err)))
+		statusLine = m.styles.Error.Render(fmt.Sprintf("Error: %v", m.err))
 	} else if m.statusMsg != "" {
-		sb.WriteString(m.styles.Success.Render(m.statusMsg))
+		statusLine = m.styles.Muted.Render(m.statusMsg)
 	}
 
-	// Footer
-	sb.WriteString("\n")
+	// Footer — push to bottom by filling remaining vertical space.
+	content := sb.String()
+	contentHeight := strings.Count(content, "\n") + 1
+	appPaddingV := 2 // Top + bottom padding from App style
+	footerLines := 1 // Help text
+	if statusLine != "" {
+		footerLines += 2 // Status line + blank line separating it from help
+	}
+	remaining := m.height - contentHeight - appPaddingV - footerLines
+	if remaining > 0 {
+		sb.WriteString(strings.Repeat("\n", remaining))
+	}
+
+	if statusLine != "" {
+		sb.WriteString(statusLine)
+		sb.WriteString("\n")
+	}
 	sb.WriteString(m.styles.Footer.Render(m.renderHelp()))
 
 	return m.styles.App.Render(sb.String())
@@ -397,7 +410,7 @@ func (m Model) renderList() string {
 
 	// Calculate visible items based on height
 	listHeight := m.height - 12 // Account for header, footer, etc.
-	itemHeight := 2            // Each item is 2 lines
+	itemHeight := 3            // Each item is 2 lines + 1 blank line
 	visibleItems := listHeight / itemHeight
 	if visibleItems < 1 {
 		visibleItems = 5
@@ -415,7 +428,7 @@ func (m Model) renderList() string {
 
 	for i := start; i < end; i++ {
 		if i > start {
-			sb.WriteString("\n")
+			sb.WriteString("\n\n")
 		}
 		selected := i == m.cursor
 		sb.WriteString(renderArticleItem(m.articles[i], selected, m.width-4, m.styles))

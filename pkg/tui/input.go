@@ -9,6 +9,7 @@ import (
 type URLInputModel struct {
 	textInput textinput.Model
 	styles    Styles
+	width     int
 }
 
 // NewURLInput creates a new URL input model.
@@ -17,11 +18,12 @@ func NewURLInput(styles Styles) URLInputModel {
 	ti.Placeholder = "https://example.com/article"
 	ti.Focus()
 	ti.CharLimit = 2048
-	ti.Width = 54 // Fit within the input box
+	ti.Width = 54
 
 	return URLInputModel{
 		textInput: ti,
 		styles:    styles,
+		width:     60,
 	}
 }
 
@@ -39,7 +41,9 @@ func (m URLInputModel) Update(msg tea.Msg) (URLInputModel, tea.Cmd) {
 
 // View renders the URL input.
 func (m URLInputModel) View() string {
-	return m.styles.InputBox.Render(
+	boxWidth := m.width - 6
+	box := m.styles.InputBox.Width(boxWidth)
+	return box.Render(
 		m.styles.InputLabel.Render("Add URL") + "\n\n" +
 			m.textInput.View() + "\n\n" +
 			m.styles.Muted.Render("Press Enter to fetch, Esc to cancel"),
@@ -49,6 +53,14 @@ func (m URLInputModel) View() string {
 // Value returns the current input value.
 func (m URLInputModel) Value() string {
 	return m.textInput.Value()
+}
+
+// SetWidth sets the available width for the URL input.
+func (m URLInputModel) SetWidth(w int) URLInputModel {
+	m.width = w
+	// InputBox: Width (content+padding) = w-6, inner content = w-6-4, minus prompt (2)
+	m.textInput.Width = w - 6 - 4 - 2
+	return m
 }
 
 // Reset clears the input.
@@ -67,12 +79,14 @@ type SearchInputModel struct {
 	textInput textinput.Model
 	styles    Styles
 	active    bool
+	width     int
 }
 
 // NewSearchInput creates a new search input model.
 func NewSearchInput(styles Styles) SearchInputModel {
 	ti := textinput.New()
 	ti.Placeholder = "Search..."
+	ti.Prompt = ""
 	ti.CharLimit = 100
 	ti.Width = 40
 
@@ -80,6 +94,7 @@ func NewSearchInput(styles Styles) SearchInputModel {
 		textInput: ti,
 		styles:    styles,
 		active:    false,
+		width:     60,
 	}
 }
 
@@ -99,22 +114,34 @@ func (m SearchInputModel) Update(msg tea.Msg) (SearchInputModel, tea.Cmd) {
 	return m, cmd
 }
 
-// View renders the search input.
+// View renders the search input as a bordered bar with a search icon.
 func (m SearchInputModel) View() string {
+	boxWidth := m.width - 6
+
+	var content string
+	icon := m.styles.SearchPrompt.Render("")
 	if m.active {
-		return m.styles.SearchPrompt.Render("") + m.textInput.View()
+		content = icon + m.textInput.View()
+	} else if m.textInput.Value() != "" {
+		content = icon + m.styles.ListItemTitle.Render(m.textInput.Value())
+	} else {
+		content = icon + m.styles.SearchPlaceholder.Render("Search...")
 	}
 
-	if m.textInput.Value() != "" {
-		return m.styles.SearchPrompt.Render("") + m.styles.ListItemTitle.Render(m.textInput.Value())
-	}
-
-	return m.styles.SearchPrompt.Render("") + m.styles.SearchPlaceholder.Render("Search...")
+	return m.styles.SearchBox.Width(boxWidth).Render(content)
 }
 
 // Value returns the current search query.
 func (m SearchInputModel) Value() string {
 	return m.textInput.Value()
+}
+
+// SetWidth sets the available width for the search input.
+func (m SearchInputModel) SetWidth(w int) SearchInputModel {
+	m.width = w
+	// SearchBox: Width (content+padding) = w-6, inner content = w-6-2, minus icon (2)
+	m.textInput.Width = w - 6 - 2 - 2
+	return m
 }
 
 // Activate enables search input mode.

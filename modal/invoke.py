@@ -25,20 +25,17 @@ TEST_HTML = """
 """.strip()
 
 
-def remote(url: str = ""):
+def remote(url: str = "", app_name: str = "browser"):
+    reader = modal.Cls.from_name(app_name, "ReaderLM")()
     if url:
-        import urllib.request
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req) as resp:
-            html = resp.read().decode("utf-8")
+        print(reader.url_to_markdown.remote(url))
     else:
-        html = TEST_HTML
-    reader = modal.Cls.from_name("browser", "ReaderLM")()
-    print(reader.html_to_markdown.remote(html))
+        print(reader.html_to_markdown.remote(TEST_HTML))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="")
+    parser.add_argument("--app", default="browser", choices=["browser", "browser2"])
     args = parser.parse_args()
-    remote(url=args.url)
+    remote(url=args.url, app_name=args.app)
