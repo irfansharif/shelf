@@ -133,6 +133,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.err = msg.err
 		}
+		// Reload index to pick up any manual edits to markdown metadata.
+		if err := m.store.Reload(); err != nil {
+			m.err = err
+		}
+		m.articles = m.store.List()
+		if m.cursor >= len(m.articles) {
+			m.cursor = max(0, len(m.articles)-1)
+		}
 		return m, nil
 
 	case clearStatusMsg:
@@ -218,6 +226,18 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.searchInput, cmd = m.searchInput.Activate()
 		return m, cmd
+
+	case key.Matches(msg, m.keys.Reload):
+		if err := m.store.Reload(); err != nil {
+			m.err = err
+			return m, nil
+		}
+		m.articles = m.store.List()
+		if m.cursor >= len(m.articles) {
+			m.cursor = max(0, len(m.articles)-1)
+		}
+		m.statusMsg = fmt.Sprintf("Reloaded %d articles", len(m.articles))
+		return m, nil
 	}
 
 	return m, nil
@@ -451,6 +471,7 @@ func (m Model) renderHelp() string {
 			"[enter] open in neovim",
 			"[d]elete",
 			"[/] search",
+			"[r]eload",
 			"[q]uit",
 		)
 	}

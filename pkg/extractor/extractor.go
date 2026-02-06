@@ -150,7 +150,7 @@ func extractHTMLTitle(html string) string {
 	if m == nil {
 		return ""
 	}
-	return strings.TrimSpace(m[1])
+	return htmlutil.UnescapeString(strings.TrimSpace(m[1]))
 }
 
 // extractHTMLAuthor pulls <meta name="author" content="..."> from raw HTML.
@@ -159,7 +159,7 @@ func extractHTMLAuthor(html string) string {
 	if m == nil {
 		return ""
 	}
-	return strings.TrimSpace(m[1])
+	return htmlutil.UnescapeString(strings.TrimSpace(m[1]))
 }
 
 // titleCase capitalizes the first letter of each word.

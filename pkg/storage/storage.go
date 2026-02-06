@@ -27,8 +27,9 @@ type ArticleMeta struct {
 	SourceURL    string
 	SourceDomain string    // derived from SourceURL
 	SavedAt      time.Time
-	FilePath     string // relative path, derived from disk
-	FileSize     int64  // derived from os.Stat
+	Tags         []string  // optional comma-separated tags
+	FilePath     string    // relative path, derived from disk
+	FileSize     int64     // derived from os.Stat
 }
 
 // Store manages article storage.
@@ -72,7 +73,7 @@ func (s *Store) scan() error {
 				continue
 			}
 
-			title, author, source, saved, _, err := parseFrontMatter(string(content))
+			title, author, source, saved, tags, _, err := parseFrontMatter(string(content))
 			if err != nil {
 				continue
 			}
@@ -85,6 +86,7 @@ func (s *Store) scan() error {
 				Author:    author,
 				SourceURL: source,
 				SavedAt:   saved,
+				Tags:      tags,
 				FilePath:  relPath,
 				FileSize:  calcDirSize(dirPath),
 			}
@@ -109,7 +111,7 @@ func (s *Store) scan() error {
 				continue
 			}
 
-			title, author, source, saved, _, err := parseFrontMatter(string(content))
+			title, author, source, saved, tags, _, err := parseFrontMatter(string(content))
 			if err != nil {
 				continue
 			}
@@ -119,6 +121,7 @@ func (s *Store) scan() error {
 				Author:    author,
 				SourceURL: source,
 				SavedAt:   saved,
+				Tags:      tags,
 				FilePath:  relPath,
 				FileSize:  info.Size(),
 			}
@@ -144,7 +147,7 @@ func (s *Store) Save(article *Article) error {
 		article.Meta.SavedAt = time.Now()
 	}
 
-	slug := generateDirName(article.Meta.SavedAt, article.Meta.Title)
+	slug := generateDirName(article.Meta.Title)
 	dirPath := filepath.Join(s.basePath, "articles", slug)
 	if err := os.MkdirAll(dirPath, 0755); err != nil {
 		return fmt.Errorf("creating article directory: %w", err)
@@ -180,7 +183,7 @@ func (s *Store) Get(filePath string) (*Article, error) {
 		return nil, fmt.Errorf("reading article file: %w", err)
 	}
 
-	title, author, source, saved, body, err := parseFrontMatter(string(content))
+	title, author, source, saved, tags, body, err := parseFrontMatter(string(content))
 	if err != nil {
 		return nil, fmt.Errorf("parsing front matter: %w", err)
 	}
@@ -190,6 +193,7 @@ func (s *Store) Get(filePath string) (*Article, error) {
 		Author:    author,
 		SourceURL: source,
 		SavedAt:   saved,
+		Tags:      tags,
 		FilePath:  filePath,
 	}
 	if source != "" {
@@ -244,7 +248,8 @@ func (s *Store) Search(query string) []ArticleMeta {
 	for _, meta := range s.articles {
 		if strings.Contains(strings.ToLower(meta.Title), query) ||
 			strings.Contains(strings.ToLower(meta.Author), query) ||
-			strings.Contains(strings.ToLower(meta.SourceDomain), query) {
+			strings.Contains(strings.ToLower(meta.SourceDomain), query) ||
+			strings.Contains(strings.ToLower(strings.Join(meta.Tags, ",")), query) {
 			results = append(results, meta)
 		}
 	}
@@ -256,15 +261,18 @@ func (s *Store) Search(query string) []ArticleMeta {
 	return results
 }
 
+// Reload rescans the articles directory and refreshes the cache.
+func (s *Store) Reload() error {
+	return s.scan()
+}
+
 // Count returns the total number of articles.
 func (s *Store) Count() int {
 	return len(s.articles)
 }
 
-func generateDirName(savedAt time.Time, title string) string {
-	date := savedAt.Format("2006-01-02")
-	slug := slugify(title)
-	return fmt.Sprintf("%s-%s", date, slug)
+func generateDirName(title string) string {
+	return slugify(title)
 }
 
 func slugify(s string) string {
@@ -310,11 +318,12 @@ func formatMarkdown(article *Article) string {
 
 	sb.WriteString("---\n")
 	sb.WriteString(fmt.Sprintf("title: %s\n", escapeYAML(article.Meta.Title)))
-	if article.Meta.Author != "" {
-		sb.WriteString(fmt.Sprintf("author: %s\n", escapeYAML(article.Meta.Author)))
-	}
+	sb.WriteString(fmt.Sprintf("author: %s\n", escapeYAML(article.Meta.Author)))
 	sb.WriteString(fmt.Sprintf("source: %s\n", article.Meta.SourceURL))
 	sb.WriteString(fmt.Sprintf("saved: %s\n", article.Meta.SavedAt.Format(time.RFC3339)))
+	if len(article.Meta.Tags) > 0 {
+		sb.WriteString(fmt.Sprintf("tags: %s\n", strings.Join(article.Meta.Tags, ", ")))
+	}
 	sb.WriteString("---\n\n")
 	sb.WriteString(article.Content)
 
@@ -330,11 +339,11 @@ func escapeYAML(s string) string {
 	return s
 }
 
-func parseFrontMatter(content string) (title, author, source string, saved time.Time, body string, err error) {
+func parseFrontMatter(content string) (title, author, source string, saved time.Time, tags []string, body string, err error) {
 	// Front matter is delimited by "---\n" at start and "---\n" to close.
 	parts := strings.SplitN(content, "---\n", 3)
 	if len(parts) < 3 || parts[0] != "" {
-		return "", "", "", time.Time{}, content, nil
+		return "", "", "", time.Time{}, nil, content, nil
 	}
 
 	header := parts[1]
@@ -345,12 +354,12 @@ func parseFrontMatter(content string) (title, author, source string, saved time.
 		if line == "" {
 			continue
 		}
-		idx := strings.Index(line, ": ")
+		idx := strings.Index(line, ":")
 		if idx == -1 {
 			continue
 		}
 		key := line[:idx]
-		value := line[idx+2:]
+		value := strings.TrimSpace(line[idx+1:])
 		value = unescapeYAML(value)
 
 		switch key {
@@ -363,7 +372,14 @@ func parseFrontMatter(content string) (title, author, source string, saved time.
 		case "saved":
 			saved, err = time.Parse(time.RFC3339, value)
 			if err != nil {
-				return "", "", "", time.Time{}, "", fmt.Errorf("parsing saved time: %w", err)
+				return "", "", "", time.Time{}, nil, "", fmt.Errorf("parsing saved time: %w", err)
+			}
+		case "tags":
+			for _, t := range strings.Split(value, ",") {
+				t = strings.TrimSpace(t)
+				if t != "" {
+					tags = append(tags, t)
+				}
 			}
 		}
 	}
