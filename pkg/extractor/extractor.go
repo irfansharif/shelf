@@ -13,14 +13,14 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/irfansharif/browser/pkg/markdown"
-	"github.com/irfansharif/browser/pkg/storage"
+	"github.com/irfansharif/shelf/pkg/markdown"
+	"github.com/irfansharif/shelf/pkg/storage"
 )
 
 // Extractor handles content extraction from URLs.
 type Extractor struct {
 	client      *http.Client
-	endpointURL string // Modal ReaderLM-v2 endpoint
+	endpointURL string // Modal endpoint for HTML-to-Markdown conversion
 }
 
 // New creates a new Extractor that uses the given Modal endpoint for
@@ -50,7 +50,7 @@ func (e *Extractor) Extract(sourceURL string) (*storage.Article, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; browser-tui/1.0)")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; shelf/1.0)")
 
 	resp, err := e.client.Do(req)
 	if err != nil {
@@ -97,7 +97,7 @@ func (e *Extractor) Extract(sourceURL string) (*storage.Article, error) {
 		return nil, fmt.Errorf("reading markdown response: %w", err)
 	}
 
-	body := markdown.Process(mdContent, title)
+	body := markdown.Process(mdContent)
 
 	// Re-inject image references that the LLM may have dropped.
 	images := extractHTMLImages(html, sourceURL)

@@ -25,7 +25,14 @@ TEST_HTML = """
 """.strip()
 
 
-def remote(url: str = "", app_name: str = "browser"):
+MODAL_APP_NAMES = {
+    "model": "shelf",
+    "api": "shelf-jina",
+}
+
+
+def remote(url: str = "", app: str = "model"):
+    app_name = MODAL_APP_NAMES[app]
     reader = modal.Cls.from_name(app_name, "ReaderLM")()
     if url:
         print(reader.url_to_markdown.remote(url))
@@ -36,6 +43,6 @@ def remote(url: str = "", app_name: str = "browser"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="")
-    parser.add_argument("--app", default="browser", choices=["browser", "browser2"])
+    parser.add_argument("--app", default="model", choices=["model", "api"])
     args = parser.parse_args()
-    remote(url=args.url, app_name=args.app)
+    remote(url=args.url, app=args.app)

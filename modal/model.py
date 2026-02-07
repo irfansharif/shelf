@@ -1,5 +1,5 @@
 """
-Modal app serving ReaderLM-v2 (1.5B) for HTML-to-Markdown conversion.
+Model-based HTML-to-Markdown conversion (ReaderLM-v2 1.5B on H100).
 """
 
 import modal
@@ -7,7 +7,7 @@ import modal
 MINUTES = 60
 MODEL_NAME = "jinaai/ReaderLM-v2"
 
-app = modal.App("browser")
+app = modal.App("shelf")
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.8.0-devel-ubuntu22.04", add_python="3.12")

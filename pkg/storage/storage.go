@@ -11,7 +11,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/irfansharif/browser/pkg/images"
+	"github.com/irfansharif/shelf/pkg/images"
 )
 
 // Article represents a saved article with its content.
