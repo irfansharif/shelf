@@ -10,8 +10,8 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/irfansharif/browser/pkg/extractor"
-	"github.com/irfansharif/browser/pkg/storage"
+	"github.com/irfansharif/shelf/pkg/extractor"
+	"github.com/irfansharif/shelf/pkg/storage"
 )
 
 // State represents the current UI state.
@@ -59,8 +59,8 @@ type (
 	clearStatusMsg     struct{}
 )
 
-// New creates a new TUI model. endpointURL is the Modal ReaderLM-v2 endpoint
-// used for HTML-to-Markdown conversion.
+// New creates a new TUI model. endpointURL is the Modal endpoint used for
+// HTML-to-Markdown conversion.
 func New(store *storage.Store, endpointURL string) Model {
 	styles := DefaultStyles()
 	keys := DefaultKeyMap()
@@ -366,12 +366,13 @@ func (m Model) View() string {
 	// Header
 	total := m.store.Count()
 	filtered := len(m.articles)
+	sb.WriteString(m.styles.Header.Render("Articles"))
 	if m.searchInput.Value() != "" {
-		sb.WriteString(m.styles.Header.Render(fmt.Sprintf("Articles (%d of %d)", filtered, total)))
+		sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" (%d of %d of %d)", m.cursor+1, filtered, total)))
 	} else {
-		sb.WriteString(m.styles.Header.Render(fmt.Sprintf("Articles (%d)", total)))
+		sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" (%d of %d)", m.cursor+1, total)))
 	}
-	sb.WriteString("\n")
+	sb.WriteString("\n\n")
 
 	// Search bar
 	sb.WriteString(m.searchInput.View())

@@ -1,12 +1,12 @@
 """
-Modal app using Jina Reader for URL-to-Markdown conversion (CPU only).
+API-based URL-to-Markdown conversion via Jina Reader (CPU only).
 """
 
 import modal
 
 MINUTES = 60
 
-app = modal.App("browser2")
+app = modal.App("shelf-jina")
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -30,7 +30,7 @@ def _clean_html(html: str) -> str:
     return html
 
 
-def clean_jina_output(raw: str) -> str:
+def clean_api_output(raw: str) -> str:
     """Strip Jina Reader metadata and artifacts."""
     import re
 
@@ -177,7 +177,7 @@ class ReaderLM:
         t_fetch = time.perf_counter()
 
         from lib import fix_headings, postprocess
-        cleaned = clean_jina_output(raw)
+        cleaned = clean_api_output(raw)
         cleaned = fix_headings(_clean_html(raw_html), cleaned)
         result = postprocess(cleaned)
         t_done = time.perf_counter()

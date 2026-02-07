@@ -5,7 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/irfansharif/browser/pkg/storage"
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/irfansharif/shelf/pkg/storage"
 )
 
 // formatRelativeTime returns a human-readable relative time string.
@@ -108,30 +110,51 @@ func renderArticleItem(meta storage.ArticleMeta, selected bool, width int, style
 	}
 	desc := strings.Join(descParts, " · ")
 
-	// Render tags as styled chips
+	// Render tags as styled chips, right-aligned
 	var tagStr string
 	if len(meta.Tags) > 0 {
 		var tags []string
 		for _, t := range meta.Tags {
 			tags = append(tags, styles.Tag.Render("#"+t))
 		}
-		tagStr = " " + strings.Join(tags, " ")
+		tagStr = strings.Join(tags, " ")
 	}
 
+	lineWidth := width - 2 // usable width after 2-char indent
 	if selected {
 		sb.WriteString(styles.SelectionMarker.Render(""))
 		sb.WriteString(styles.SelectedTitle.Render(title))
 		sb.WriteString("\n")
 		sb.WriteString("  ")
-		sb.WriteString(styles.SelectedDesc.Render(desc))
-		sb.WriteString(tagStr)
+		styledDesc := styles.SelectedDesc.Render(desc)
+		if tagStr != "" {
+			pad := lineWidth - len(desc) - lipgloss.Width(tagStr)
+			if pad < 1 {
+				pad = 1
+			}
+			sb.WriteString(styledDesc)
+			sb.WriteString(strings.Repeat(" ", pad))
+			sb.WriteString(tagStr)
+		} else {
+			sb.WriteString(styledDesc)
+		}
 	} else {
 		sb.WriteString("  ")
 		sb.WriteString(styles.ListItemTitle.Render(title))
 		sb.WriteString("\n")
 		sb.WriteString("  ")
-		sb.WriteString(styles.ListItemDesc.Render(desc))
-		sb.WriteString(tagStr)
+		styledDesc := styles.ListItemDesc.Render(desc)
+		if tagStr != "" {
+			pad := lineWidth - len(desc) - lipgloss.Width(tagStr)
+			if pad < 1 {
+				pad = 1
+			}
+			sb.WriteString(styledDesc)
+			sb.WriteString(strings.Repeat(" ", pad))
+			sb.WriteString(tagStr)
+		} else {
+			sb.WriteString(styledDesc)
+		}
 	}
 
 	return sb.String()

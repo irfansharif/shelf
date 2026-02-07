@@ -64,8 +64,7 @@ func DefaultStyles() Styles {
 
 		Header: lipgloss.NewStyle().
 			Bold(true).
-			Foreground(emphasis).
-			MarginBottom(1),
+			Foreground(emphasis),
 
 		Footer: lipgloss.NewStyle().
 			Foreground(subtle).
