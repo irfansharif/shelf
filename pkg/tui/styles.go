@@ -47,16 +47,17 @@ func DefaultStyles() Styles {
 	base00 := lipgloss.Color("#657b83") // body text (light bg)
 	base0 := lipgloss.Color("#839496")  // body text (dark bg)
 	base1 := lipgloss.Color("#93a1a1")  // emphasized content
+	base3 := lipgloss.Color("#fdf6e3")  // vanilla white
 
 	subtle := lipgloss.AdaptiveColor{Light: string(base01), Dark: string(base01)}
 	body := lipgloss.AdaptiveColor{Light: string(base00), Dark: string(base0)}
 	emphasis := lipgloss.AdaptiveColor{Light: string(base00), Dark: string(base1)}
+	text := lipgloss.AdaptiveColor{Light: string(base00), Dark: string(base3)}
 
 	// Solarized accents
 	yellow := lipgloss.Color("#b58900")
 	orange := lipgloss.Color("#cb4b16")
 	green := lipgloss.Color("#859900")
-	cyan := lipgloss.Color("#2aa198")
 
 	return Styles{
 		App: lipgloss.NewStyle().
@@ -64,7 +65,7 @@ func DefaultStyles() Styles {
 
 		Header: lipgloss.NewStyle().
 			Bold(true).
-			Foreground(emphasis),
+			Foreground(orange),
 
 		Footer: lipgloss.NewStyle().
 			Foreground(subtle).
@@ -78,7 +79,7 @@ func DefaultStyles() Styles {
 			PaddingLeft(2),
 
 		ListItemTitle: lipgloss.NewStyle().
-			Foreground(body),
+			Foreground(text),
 
 		ListItemDesc: lipgloss.NewStyle().
 			Foreground(subtle),
@@ -126,7 +127,7 @@ func DefaultStyles() Styles {
 			Foreground(subtle),
 
 		Tag: lipgloss.NewStyle().
-			Foreground(cyan),
+			Foreground(green),
 
 		SearchBox: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
