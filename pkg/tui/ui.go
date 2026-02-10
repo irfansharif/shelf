@@ -37,9 +37,10 @@ type Model struct {
 	height   int
 
 	// List state
-	articles  []storage.ArticleMeta
-	cursor    int
-	scrollPos int
+	articles     []storage.ArticleMeta
+	cursor       int
+	scrollPos    int
+	showArchived bool
 
 	// Components
 	urlInput    URLInputModel
@@ -76,7 +77,7 @@ func New(store *storage.Store, endpointURL string) Model {
 	s.Spinner = spinner.Dot
 	s.Style = styles.Spinner
 
-	return Model{
+	m := Model{
 		state:       stateList,
 		store:       store,
 		extract:     extractor.New(endpointURL),
@@ -85,8 +86,9 @@ func New(store *storage.Store, endpointURL string) Model {
 		urlInput:    NewURLInput(styles),
 		searchInput: NewSearchInput(styles),
 		spinner:     s,
-		articles:    store.List(),
 	}
+	m.refreshArticles()
+	return m
 }
 
 // Init initializes the model.
@@ -139,7 +141,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.state = stateList
 		m.pendingResult = nil
-		m.articles = m.store.List()
+		m.refreshArticles()
 		m.err = nil
 		for i, a := range m.articles {
 			if a.Title == msg.result.Title {
@@ -156,10 +158,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case articleDeletedMsg:
-		m.articles = m.store.List()
-		if m.cursor >= len(m.articles) && m.cursor > 0 {
-			m.cursor--
-		}
+		m.refreshArticles()
 		m.statusMsg = "Article deleted"
 		return m, nil
 
@@ -171,10 +170,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err := m.store.Reload(); err != nil {
 			m.err = err
 		}
-		m.articles = m.store.List()
-		if m.cursor >= len(m.articles) {
-			m.cursor = max(0, len(m.articles)-1)
-		}
+		m.refreshArticles()
 		return m, nil
 
 	case clearStatusMsg:
@@ -261,6 +257,14 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Delete):
 		return m.deleteSelectedArticle()
 
+	case key.Matches(msg, m.keys.Archive):
+		return m.archiveSelectedArticle()
+
+	case key.Matches(msg, m.keys.ShowArchive):
+		m.showArchived = !m.showArchived
+		m.refreshArticles()
+		return m, nil
+
 	case key.Matches(msg, m.keys.Search):
 		m.state = stateSearch
 		var cmd tea.Cmd
@@ -313,6 +317,30 @@ func (m Model) handleAddURLKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Check if an article from this URL already exists.
 		for _, a := range m.store.List() {
 			if a.SourceURL == url {
+				if a.IsArchived() {
+					// Unarchive instead of re-fetching.
+					var newTags []string
+					for _, t := range a.Tags {
+						if strings.ToLower(t) != "archived" {
+							newTags = append(newTags, t)
+						}
+					}
+					if err := m.store.UpdateTags(a.FilePath, newTags); err != nil {
+						m.err = err
+						m.state = stateList
+						return m, nil
+					}
+					m.state = stateList
+					m.statusMsg = fmt.Sprintf("Unarchived %q", a.Title)
+					m.refreshArticles()
+					for i, ar := range m.articles {
+						if ar.FilePath == a.FilePath {
+							m.cursor = i
+							break
+						}
+					}
+					return m, nil
+				}
 				m.state = stateConfirmOverwrite
 				m.overwritePath = a.FilePath
 				m.overwriteTitle = a.Title
@@ -337,7 +365,7 @@ func (m Model) handleSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case msg.String() == "ctrl+c":
 		if m.searchInput.Value() != "" {
 			m.searchInput = m.searchInput.Clear()
-			m.articles = m.store.List()
+			m.refreshArticles()
 			m.cursor = 0
 			return m, nil
 		}
@@ -349,7 +377,7 @@ func (m Model) handleSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state = stateList
 		m.searchInput = m.searchInput.Deactivate()
 		m.searchInput = m.searchInput.Clear()
-		m.articles = m.store.List()
+		m.refreshArticles()
 		m.cursor = 0
 		return m, nil
 
@@ -396,7 +424,7 @@ func (m Model) handleConfirmOverwriteKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.state = stateList
-			m.articles = m.store.List()
+			m.refreshArticles()
 			m.err = nil
 			for i, a := range m.articles {
 				if a.Title == m.pendingResult.Title {
@@ -470,6 +498,65 @@ func (m Model) deleteSelectedArticle() (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m *Model) refreshArticles() {
+	if m.searchInput.Value() != "" {
+		m.articles = m.store.Search(m.searchInput.Value())
+	} else {
+		m.articles = m.applyArchiveFilter(m.store.List())
+	}
+	if m.cursor >= len(m.articles) {
+		m.cursor = max(0, len(m.articles)-1)
+	}
+}
+
+func (m Model) applyArchiveFilter(articles []storage.ArticleMeta) []storage.ArticleMeta {
+	if m.showArchived {
+		return articles
+	}
+	var filtered []storage.ArticleMeta
+	for _, a := range articles {
+		if !a.IsArchived() {
+			filtered = append(filtered, a)
+		}
+	}
+	return filtered
+}
+
+func (m Model) archiveSelectedArticle() (tea.Model, tea.Cmd) {
+	if len(m.articles) == 0 || m.cursor >= len(m.articles) {
+		return m, nil
+	}
+
+	article := m.articles[m.cursor]
+	tags := article.Tags
+
+	if article.IsArchived() {
+		// Remove "archived" tag
+		var newTags []string
+		for _, t := range tags {
+			if strings.ToLower(t) != "archived" {
+				newTags = append(newTags, t)
+			}
+		}
+		tags = newTags
+		if err := m.store.UpdateTags(article.FilePath, tags); err != nil {
+			m.err = err
+			return m, nil
+		}
+		m.statusMsg = fmt.Sprintf("Unarchived %q", article.Title)
+	} else {
+		tags = append(tags, "archived")
+		if err := m.store.UpdateTags(article.FilePath, tags); err != nil {
+			m.err = err
+			return m, nil
+		}
+		m.statusMsg = fmt.Sprintf("Archived %q", article.Title)
+	}
+
+	m.refreshArticles()
+	return m, nil
+}
+
 // View renders the TUI.
 func (m Model) View() string {
 	if m.width == 0 {
@@ -479,14 +566,16 @@ func (m Model) View() string {
 	var sb strings.Builder
 
 	// Header
-	total := m.store.Count()
 	filtered := len(m.articles)
 	sb.WriteString(m.styles.Header.Render("Articles"))
+	if m.showArchived {
+		sb.WriteString(m.styles.Muted.Render(" (+archived)"))
+	}
 	if m.state != stateAddURL && m.state != stateLoading && m.state != stateConfirmOverwrite {
 		if m.searchInput.Value() != "" {
-			sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" (%d of %d of %d)", m.cursor+1, filtered, total)))
+			sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" (%d of %d of %d)", m.cursor+1, filtered, m.store.Count())))
 		} else {
-			sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" (%d of %d)", m.cursor+1, total)))
+			sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" (%d of %d)", m.cursor+1, filtered)))
 		}
 	}
 	sb.WriteString("\n\n")
@@ -528,10 +617,7 @@ func (m Model) View() string {
 	content := sb.String()
 	contentHeight := strings.Count(content, "\n") + 1
 	appPaddingV := 2 // Top + bottom padding from App style
-	footerLines := 2 // Help text + blank line above it
-	if statusLine != "" {
-		footerLines++ // Status line replaces the blank line
-	}
+	footerLines := 2 // Status/blank line + help text
 	remaining := m.height - contentHeight - appPaddingV - footerLines
 	if remaining > 0 {
 		sb.WriteString(strings.Repeat("\n", remaining))
@@ -576,9 +662,28 @@ func (m Model) renderList() string {
 		end = len(m.articles)
 	}
 
+	// Find the archive boundary (first archived article index) for separator.
+	archiveBoundary := -1
+	if m.showArchived {
+		for i, a := range m.articles {
+			if a.IsArchived() {
+				archiveBoundary = i
+				break
+			}
+		}
+	}
+
 	for i := start; i < end; i++ {
 		if i > start {
-			sb.WriteString("\n\n")
+			if i == archiveBoundary {
+				// Draw a separator line between non-archived and archived groups.
+				sep := strings.Repeat("─", m.width-6)
+				sb.WriteString("\n\n")
+				sb.WriteString(m.styles.Muted.Render(sep))
+				sb.WriteString("\n\n")
+			} else {
+				sb.WriteString("\n\n")
+			}
 		}
 		selected := i == m.cursor
 		sb.WriteString(renderArticleItem(m.articles[i], selected, m.width-4, m.styles))
@@ -598,10 +703,20 @@ func (m Model) renderHelp() string {
 	case stateConfirmOverwrite:
 		parts = append(parts, "[y] overwrite", "[n] cancel")
 	default:
+		archiveLabel := "[x] archive"
+		if len(m.articles) > 0 && m.cursor < len(m.articles) && m.articles[m.cursor].IsArchived() {
+			archiveLabel = "[x] unarchive"
+		}
+		showArchiveLabel := "[X] show archived"
+		if m.showArchived {
+			showArchiveLabel = "[X] hide archived"
+		}
 		parts = append(parts,
 			"[a]dd URL",
 			"[enter] open in neovim",
 			"[d]elete",
+			archiveLabel,
+			showArchiveLabel,
 			"[/] search",
 			"[r]efetch",
 			"[q]uit",

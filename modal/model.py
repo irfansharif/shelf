@@ -19,7 +19,9 @@ image = (
         "huggingface-hub==0.36.0",
         "readability-lxml", "lxml[html_clean]",
         "curl_cffi",
+        "playwright",
     )
+    .run_commands("playwright install chromium --with-deps")
     .add_local_file("lib.py", "/root/lib.py")
 )
 
@@ -120,7 +122,7 @@ class Converter:
         from fastapi.responses import JSONResponse
 
         from curl_cffi import requests as cffi_requests
-        from lib import download_images, format_article
+        from lib import download_images, fetch_with_js, format_article, needs_js_rendering
 
         try:
             url = data["url"]
@@ -131,7 +133,13 @@ class Converter:
                 impersonate="chrome",
             )
             resp.raise_for_status()
-            result = self._convert(resp.text)
+            raw_html = resp.text
+
+            # Fall back to headless browser if the page requires JS rendering.
+            if needs_js_rendering(raw_html):
+                raw_html = fetch_with_js(url)
+
+            result = self._convert(raw_html)
             markdown, images = download_images(result["markdown"])
             content = format_article(
                 result["title"], result["author"], url, markdown,
@@ -148,7 +156,7 @@ class Converter:
     @modal.method()
     def url_to_markdown(self, url: str) -> dict:
         from curl_cffi import requests as cffi_requests
-        from lib import download_images, format_article
+        from lib import download_images, fetch_with_js, format_article, needs_js_rendering
 
         resp = cffi_requests.get(
             url,
@@ -157,7 +165,13 @@ class Converter:
             impersonate="chrome",
         )
         resp.raise_for_status()
-        result = self._convert(resp.text)
+        raw_html = resp.text
+
+        # Fall back to headless browser if the page requires JS rendering.
+        if needs_js_rendering(raw_html):
+            raw_html = fetch_with_js(url)
+
+        result = self._convert(raw_html)
         markdown, images = download_images(result["markdown"])
         content = format_article(
             result["title"], result["author"], url, markdown,
