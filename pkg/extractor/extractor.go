@@ -2,17 +2,13 @@ package extractor
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
-	"strings"
 	"time"
-	"unicode"
-
-	"github.com/irfansharif/shelf/pkg/storage"
 )
 
 // Extractor handles content extraction from URLs.
@@ -32,15 +28,33 @@ func New(endpointURL string) *Extractor {
 	}
 }
 
+// ImageData holds a downloaded image with its relative path.
+type ImageData struct {
+	Path string // e.g. "images/photo.jpg"
+	Data []byte // decoded image bytes
+}
+
+// ExtractResult is the result of extracting an article from a URL.
+type ExtractResult struct {
+	Title   string      // article title (for slug generation)
+	Content string      // complete index.md content (front matter + markdown)
+	Images  []ImageData // downloaded images with relative paths
+}
+
 // endpointResponse is the structured response from the Modal endpoint.
 type endpointResponse struct {
-	Title    string `json:"title"`
-	Author   string `json:"author"`
-	Markdown string `json:"markdown"`
+	Title   string              `json:"title"`
+	Content string              `json:"content"`
+	Images  []endpointImageData `json:"images"`
+}
+
+type endpointImageData struct {
+	Path string `json:"path"`
+	Data string `json:"data"` // base64-encoded
 }
 
 // Extract fetches HTML from a URL and converts it to markdown via the Modal endpoint.
-func (e *Extractor) Extract(sourceURL string) (*storage.Article, error) {
+func (e *Extractor) Extract(sourceURL string) (*ExtractResult, error) {
 	parsed, err := url.Parse(sourceURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid URL: %w", err)
@@ -71,54 +85,19 @@ func (e *Extractor) Extract(sourceURL string) (*storage.Article, error) {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
 
-	title := result.Title
-	if title == "" {
-		title = extractTitleFromURL(sourceURL)
-	}
-
-	article := &storage.Article{
-		Meta: storage.ArticleMeta{
-			Title:     title,
-			Author:    result.Author,
-			SourceURL: sourceURL,
-		},
-		Content: result.Markdown,
-	}
-
-	return article, nil
-}
-
-// extractTitleFromURL generates a title from the URL path.
-func extractTitleFromURL(sourceURL string) string {
-	parsed, err := url.Parse(sourceURL)
-	if err != nil {
-		return "Untitled"
-	}
-
-	path := strings.Trim(parsed.Path, "/")
-	segments := strings.Split(path, "/")
-	if len(segments) > 0 {
-		last := segments[len(segments)-1]
-		last = strings.ReplaceAll(last, "-", " ")
-		last = strings.ReplaceAll(last, "_", " ")
-		if idx := strings.LastIndex(last, "."); idx > 0 {
-			last = last[:idx]
+	// Decode base64 image data.
+	var images []ImageData
+	for _, img := range result.Images {
+		data, err := base64.StdEncoding.DecodeString(img.Data)
+		if err != nil {
+			return nil, fmt.Errorf("decoding image %s: %w", img.Path, err)
 		}
-		if last != "" {
-			return titleCase(last)
-		}
+		images = append(images, ImageData{Path: img.Path, Data: data})
 	}
 
-	return parsed.Host
-}
-
-var wordStartRe = regexp.MustCompile(`\b\w`)
-
-// titleCase capitalizes the first letter of each word.
-func titleCase(s string) string {
-	return wordStartRe.ReplaceAllStringFunc(s, func(match string) string {
-		runes := []rune(match)
-		runes[0] = unicode.ToUpper(runes[0])
-		return string(runes)
-	})
+	return &ExtractResult{
+		Title:   result.Title,
+		Content: result.Content,
+		Images:  images,
+	}, nil
 }

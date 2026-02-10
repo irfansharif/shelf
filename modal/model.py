@@ -120,6 +120,7 @@ class Converter:
         from fastapi.responses import JSONResponse
 
         from curl_cffi import requests as cffi_requests
+        from lib import download_images, format_article
 
         try:
             url = data["url"]
@@ -130,7 +131,12 @@ class Converter:
                 impersonate="chrome",
             )
             resp.raise_for_status()
-            return self._convert(resp.text)
+            result = self._convert(resp.text)
+            markdown, images = download_images(result["markdown"])
+            content = format_article(
+                result["title"], result["author"], url, markdown,
+            )
+            return {"title": result["title"], "content": content, "images": images}
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -142,6 +148,7 @@ class Converter:
     @modal.method()
     def url_to_markdown(self, url: str) -> dict:
         from curl_cffi import requests as cffi_requests
+        from lib import download_images, format_article
 
         resp = cffi_requests.get(
             url,
@@ -150,4 +157,9 @@ class Converter:
             impersonate="chrome",
         )
         resp.raise_for_status()
-        return self._convert(resp.text)
+        result = self._convert(resp.text)
+        markdown, images = download_images(result["markdown"])
+        content = format_article(
+            result["title"], result["author"], url, markdown,
+        )
+        return {"title": result["title"], "content": content, "images": images}

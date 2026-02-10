@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 	"unicode"
-
-	"github.com/irfansharif/shelf/pkg/images"
 )
 
 var multiHyphenRe = regexp.MustCompile(`-+`)
@@ -26,7 +24,7 @@ func (e *ErrArticleExists) Error() string {
 	return fmt.Sprintf("article already exists: %s", e.Slug)
 }
 
-// Article represents a saved article with its content.
+// Article represents a saved article with its content (used for the read path).
 type Article struct {
 	Meta    ArticleMeta
 	Content string
@@ -42,6 +40,12 @@ type ArticleMeta struct {
 	Tags         []string  // optional comma-separated tags
 	FilePath     string    // relative path, derived from disk
 	FileSize     int64     // derived from os.Stat
+}
+
+// ImageFile holds image data to be written to disk.
+type ImageFile struct {
+	Path string // relative path, e.g. "images/photo.jpg"
+	Data []byte
 }
 
 // Store manages article storage.
@@ -153,15 +157,12 @@ func (s *Store) scan() error {
 	return nil
 }
 
-// Save stores an article and updates the cache. If an article with the same
-// slug already exists, it returns *ErrArticleExists. Use SaveForce to
+// SaveContent stores article content and images. Content is the complete
+// index.md file (front matter + markdown). If an article with the same slug
+// already exists, it returns *ErrArticleExists. Use SaveContentForce to
 // overwrite.
-func (s *Store) Save(article *Article) error {
-	if article.Meta.SavedAt.IsZero() {
-		article.Meta.SavedAt = time.Now()
-	}
-
-	slug := generateDirName(article.Meta.Title)
+func (s *Store) SaveContent(title, content string, images []ImageFile) error {
+	slug := generateDirName(title)
 	dirPath := filepath.Join(s.basePath, "articles", slug)
 
 	if _, err := os.Stat(dirPath); err == nil {
@@ -175,33 +176,34 @@ func (s *Store) Save(article *Article) error {
 		return &ErrArticleExists{Slug: slug, Title: existingTitle}
 	}
 
-	return s.save(article, slug, dirPath)
+	return s.saveContent(slug, dirPath, content, images)
 }
 
-// SaveForce stores an article, overwriting any existing article with the same
-// slug.
-func (s *Store) SaveForce(article *Article) error {
-	if article.Meta.SavedAt.IsZero() {
-		article.Meta.SavedAt = time.Now()
-	}
-
-	slug := generateDirName(article.Meta.Title)
+// SaveContentForce stores article content and images, overwriting any existing
+// article with the same slug.
+func (s *Store) SaveContentForce(title, content string, images []ImageFile) error {
+	slug := generateDirName(title)
 	dirPath := filepath.Join(s.basePath, "articles", slug)
-	return s.save(article, slug, dirPath)
+	return s.saveContent(slug, dirPath, content, images)
 }
 
-func (s *Store) save(article *Article, slug, dirPath string) error {
+func (s *Store) saveContent(slug, dirPath, content string, images []ImageFile) error {
 	if err := os.MkdirAll(dirPath, 0755); err != nil {
 		return fmt.Errorf("creating article directory: %w", err)
 	}
 
-	// Download images and rewrite markdown references.
-	imagesDir := filepath.Join(dirPath, "images")
-	article.Content = images.DownloadAndRewrite(article.Content, imagesDir)
+	// Write images.
+	for _, img := range images {
+		imgPath := filepath.Join(dirPath, img.Path)
+		if err := os.MkdirAll(filepath.Dir(imgPath), 0755); err != nil {
+			return fmt.Errorf("creating image directory: %w", err)
+		}
+		if err := os.WriteFile(imgPath, img.Data, 0644); err != nil {
+			return fmt.Errorf("writing image %s: %w", img.Path, err)
+		}
+	}
 
-	article.Meta.FilePath = filepath.Join("articles", slug, "index.md")
-	content := formatMarkdown(article)
-
+	// Write index.md.
 	indexPath := filepath.Join(dirPath, "index.md")
 	if err := os.WriteFile(indexPath, []byte(content), 0644); err != nil {
 		return fmt.Errorf("writing article file: %w", err)
@@ -354,32 +356,6 @@ func slugify(s string) string {
 	return slug
 }
 
-func formatMarkdown(article *Article) string {
-	var sb strings.Builder
-
-	sb.WriteString("---\n")
-	sb.WriteString(fmt.Sprintf("title: %s\n", escapeYAML(article.Meta.Title)))
-	sb.WriteString(fmt.Sprintf("author: %s\n", escapeYAML(article.Meta.Author)))
-	sb.WriteString(fmt.Sprintf("source: %s\n", article.Meta.SourceURL))
-	sb.WriteString(fmt.Sprintf("saved: %s\n", article.Meta.SavedAt.Format(time.RFC3339)))
-	if len(article.Meta.Tags) > 0 {
-		sb.WriteString(fmt.Sprintf("tags: %s\n", strings.Join(article.Meta.Tags, ", ")))
-	}
-	sb.WriteString("---\n\n")
-	sb.WriteString(article.Content)
-
-	return sb.String()
-}
-
-func escapeYAML(s string) string {
-	// If the string contains special characters, quote it
-	if strings.ContainsAny(s, ":#{}[]&*!|>'\"%@`") || strings.HasPrefix(s, "-") {
-		s = strings.ReplaceAll(s, `"`, `\"`)
-		return `"` + s + `"`
-	}
-	return s
-}
-
 func parseFrontMatter(content string) (title, author, source string, saved time.Time, tags []string, body string, err error) {
 	// Front matter is delimited by "---\n" at start and "---\n" to close.
 	parts := strings.SplitN(content, "---\n", 3)
@@ -447,4 +423,3 @@ func calcDirSize(dir string) int64 {
 	})
 	return size
 }
-

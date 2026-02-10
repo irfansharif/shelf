@@ -47,7 +47,7 @@ type Model struct {
 	spinner     spinner.Model
 
 	// Overwrite confirmation
-	pendingArticle *storage.Article
+	pendingResult *extractor.ExtractResult
 
 	// Status
 	err        error
@@ -57,7 +57,7 @@ type Model struct {
 // Messages
 type (
 	articlesFetchedMsg struct{ articles []storage.ArticleMeta }
-	articleExtractedMsg struct{ article *storage.Article }
+	articleExtractedMsg struct{ result *extractor.ExtractResult }
 	articleDeletedMsg   struct{ id string }
 	extractionErrMsg    struct{ err error }
 	editorFinishedMsg  struct{ err error }
@@ -114,11 +114,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case articleExtractedMsg:
-		if err := m.store.Save(msg.article); err != nil {
+		images := make([]storage.ImageFile, len(msg.result.Images))
+		for i, img := range msg.result.Images {
+			images[i] = storage.ImageFile{Path: img.Path, Data: img.Data}
+		}
+		if err := m.store.SaveContent(msg.result.Title, msg.result.Content, images); err != nil {
 			var existsErr *storage.ErrArticleExists
 			if errors.As(err, &existsErr) {
 				m.state = stateConfirmOverwrite
-				m.pendingArticle = msg.article
+				m.pendingResult = msg.result
 				return m, nil
 			}
 			m.state = stateList
@@ -126,9 +130,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.state = stateList
-		m.pendingArticle = nil
+		m.pendingResult = nil
 		m.articles = m.store.List()
-		m.statusMsg = fmt.Sprintf("Saved: %s", msg.article.Meta.Title)
+		m.statusMsg = fmt.Sprintf("Saved: %s", msg.result.Title)
 		m.err = nil
 		return m, nil
 
@@ -268,6 +272,14 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleAddURLKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
+	case msg.String() == "ctrl+c":
+		if m.urlInput.Value() != "" {
+			m.urlInput = m.urlInput.Reset()
+			return m, nil
+		}
+		m.state = stateList
+		return m, nil
+
 	case key.Matches(msg, m.keys.Cancel):
 		m.state = stateList
 		return m, nil
@@ -293,6 +305,17 @@ func (m Model) handleAddURLKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
+	case msg.String() == "ctrl+c":
+		if m.searchInput.Value() != "" {
+			m.searchInput = m.searchInput.Clear()
+			m.articles = m.store.List()
+			m.cursor = 0
+			return m, nil
+		}
+		m.state = stateList
+		m.searchInput = m.searchInput.Deactivate()
+		return m, nil
+
 	case key.Matches(msg, m.keys.Cancel):
 		m.state = stateList
 		m.searchInput = m.searchInput.Deactivate()
@@ -320,32 +343,36 @@ func (m Model) handleSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) extractArticle(url string) tea.Cmd {
 	return func() tea.Msg {
-		article, err := m.extract.Extract(url)
+		result, err := m.extract.Extract(url)
 		if err != nil {
 			return extractionErrMsg{err: err}
 		}
-		return articleExtractedMsg{article: article}
+		return articleExtractedMsg{result: result}
 	}
 }
 
 func (m Model) handleConfirmOverwriteKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
-		if err := m.store.SaveForce(m.pendingArticle); err != nil {
+		images := make([]storage.ImageFile, len(m.pendingResult.Images))
+		for i, img := range m.pendingResult.Images {
+			images[i] = storage.ImageFile{Path: img.Path, Data: img.Data}
+		}
+		if err := m.store.SaveContentForce(m.pendingResult.Title, m.pendingResult.Content, images); err != nil {
 			m.state = stateList
 			m.err = err
-			m.pendingArticle = nil
+			m.pendingResult = nil
 			return m, nil
 		}
 		m.state = stateList
 		m.articles = m.store.List()
-		m.statusMsg = fmt.Sprintf("Saved: %s", m.pendingArticle.Meta.Title)
-		m.pendingArticle = nil
+		m.statusMsg = fmt.Sprintf("Saved: %s", m.pendingResult.Title)
+		m.pendingResult = nil
 		m.err = nil
 		return m, nil
 	case "n", "N", "esc":
 		m.state = stateList
-		m.pendingArticle = nil
+		m.pendingResult = nil
 		m.statusMsg = "Save cancelled"
 		return m, nil
 	}
@@ -429,7 +456,7 @@ func (m Model) View() string {
 		sb.WriteString(m.spinner.View())
 		sb.WriteString(" Fetching article...")
 	case stateConfirmOverwrite:
-		title := m.pendingArticle.Meta.Title
+		title := m.pendingResult.Title
 		sb.WriteString(fmt.Sprintf("Article %q already exists. Overwrite? [y/n]", title))
 	default:
 		sb.WriteString(m.renderList())

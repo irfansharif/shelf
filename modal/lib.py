@@ -1,8 +1,12 @@
 """Shared utilities for HTML-to-Markdown post-processing."""
 
+import base64
+import os.path
 import re
 import textwrap
+from datetime import datetime, timezone
 from html.parser import HTMLParser
+from urllib.parse import urlparse
 
 
 def clean_html(html: str, *, strip_data_uris: bool = False) -> str:
@@ -263,3 +267,149 @@ def postprocess(markdown: str) -> str:
     # Final trim.
     markdown = markdown.strip() + "\n"
     return markdown
+
+
+_MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+
+IMAGE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+}
+
+
+def _local_filename(raw_url, used_names):
+    """Generate a sanitized, deduplicated local filename from a URL.
+
+    Port of Go's images.go:localFilename().
+    """
+    try:
+        parsed = urlparse(raw_url)
+        base = os.path.basename(parsed.path)
+    except Exception:
+        base = ""
+
+    if not base or base in (".", "/"):
+        base = "image.png"
+
+    # Sanitize: keep only alphanumeric, hyphens, underscores, dots.
+    name = re.sub(r"[^a-zA-Z0-9._-]", "", base)
+    if not name:
+        name = "image.png"
+
+    # Ensure it has an extension.
+    if not os.path.splitext(name)[1]:
+        name += ".png"
+
+    # Deduplicate.
+    if name not in used_names:
+        return name
+    stem, ext = os.path.splitext(name)
+    i = 2
+    while True:
+        candidate = f"{stem}-{i}{ext}"
+        if candidate not in used_names:
+            return candidate
+        i += 1
+
+
+def download_images(markdown):
+    """Download remote images referenced in markdown.
+
+    Returns (rewritten_markdown, [{"path": "images/filename", "data": base64_str}]).
+    Failed downloads keep the original remote URL.
+    """
+    from curl_cffi import requests as cffi_requests
+
+    matches = list(_MARKDOWN_IMAGE_RE.finditer(markdown))
+    if not matches:
+        return markdown, []
+
+    # Collect unique remote URLs.
+    used_names = set()
+    seen = {}  # url -> local filename
+    remote_urls = []
+
+    for m in matches:
+        url = m.group(2)
+        if not (url.startswith("http://") or url.startswith("https://")):
+            continue
+        if url in seen:
+            continue
+        filename = _local_filename(url, used_names)
+        used_names.add(filename)
+        seen[url] = filename
+        remote_urls.append(url)
+
+    if not remote_urls:
+        return markdown, []
+
+    # Download each image.
+    downloaded = {}  # url -> base64 data
+    for url in remote_urls:
+        try:
+            resp = cffi_requests.get(
+                url,
+                headers=IMAGE_HEADERS,
+                timeout=30,
+                impersonate="chrome",
+            )
+            if resp.status_code == 200 and resp.content:
+                downloaded[url] = base64.b64encode(resp.content).decode("ascii")
+                print(f"[images] downloaded {seen[url]} ({len(resp.content)} bytes)")
+            else:
+                print(f"[images] failed {url}: HTTP {resp.status_code}")
+        except Exception as e:
+            print(f"[images] failed {url}: {e}")
+
+    if not downloaded:
+        return markdown, []
+
+    # Build image list.
+    image_list = []
+    seen_paths = set()
+    for url, b64 in downloaded.items():
+        path = f"images/{seen[url]}"
+        if path not in seen_paths:
+            image_list.append({"path": path, "data": b64})
+            seen_paths.add(path)
+
+    # Rewrite markdown references (process in reverse to preserve indices).
+    result = markdown
+    for m in reversed(matches):
+        url = m.group(2)
+        if url not in downloaded:
+            continue
+        alt = m.group(1)
+        filename = seen[url]
+        if not alt:
+            alt = os.path.splitext(filename)[0]
+        replacement = f"![{alt}](images/{filename})"
+        result = result[:m.start()] + replacement + result[m.end():]
+
+    return result, image_list
+
+
+_YAML_SPECIAL_RE = re.compile(r"[:#{}[\]&*!|>'\"%@`]")
+
+
+def _escape_yaml(s):
+    """Quote a YAML string value if it contains special characters."""
+    if _YAML_SPECIAL_RE.search(s) or s.startswith("-"):
+        return '"' + s.replace('"', '\\"') + '"'
+    return s
+
+
+def format_article(title, author, source, markdown):
+    """Generate complete index.md content with YAML front matter."""
+    saved = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    lines = ["---"]
+    lines.append(f"title: {_escape_yaml(title)}")
+    lines.append(f"author: {_escape_yaml(author)}")
+    lines.append(f"source: {source}")
+    lines.append(f"saved: {saved}")
+    lines.append("tags:")
+    lines.append("---")
+    lines.append("")
+    lines.append(markdown.rstrip("\n"))
+    lines.append("")
+    return "\n".join(lines)
