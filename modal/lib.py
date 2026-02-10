@@ -5,6 +5,31 @@ import textwrap
 from html.parser import HTMLParser
 
 
+def clean_html(html: str, *, strip_data_uris: bool = False) -> str:
+    """Remove scripts, styles, and other non-content elements.
+
+    When strip_data_uris is True, also strip base64-encoded images and
+    collapse SVG elements to placeholders (useful for model-based
+    conversion where data URIs waste tokens).
+    """
+    html = re.sub(r"<[ ]*script.*?/[ ]*script[ ]*>", "", html,
+                  flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+    html = re.sub(r"<[ ]*style.*?/[ ]*style[ ]*>", "", html,
+                  flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+    html = re.sub(r"<[ ]*meta.*?>", "", html,
+                  flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+    html = re.sub(r"<[ ]*!--.*?--[ ]*>", "", html,
+                  flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+    html = re.sub(r"<[ ]*link.*?>", "", html,
+                  flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+    if strip_data_uris:
+        html = re.sub(r'<img[^>]+src="data:image/[^;]+;base64,[^"]+"[^>]*>',
+                      '<img src="#"/>', html)
+        html = re.sub(r"(<svg[^>]*>)(.*?)(</svg>)",
+                      r"\1\3", html, flags=re.DOTALL)
+    return html
+
+
 def fix_headings(html: str, markdown: str) -> str:
     """Strip hallucinated headings and re-inject real ones from source HTML.
 
@@ -171,9 +196,14 @@ def postprocess(markdown: str) -> str:
     markdown = re.sub(r"\n{3,}", "\n\n", markdown)
 
     # Wrap text body at 100 chars (display width).
-    # With vim conceallevel=2, [text](url) displays as just "text". Use the
-    # link text length as the placeholder width so wrapping targets the
-    # displayed width, not the raw markdown width.
+    # With vim conceallevel=2, [text](url) displays as just "text" and
+    # bold/italic markers (**,*) are hidden. Use the link text length as the
+    # placeholder width so wrapping targets the displayed width.
+    #
+    # To prevent very long raw lines when URLs are long, cap the amount of
+    # concealment per link to MAX_CONCEAL chars. Any URL syntax beyond that
+    # budget still counts toward the line width, causing wrapping to kick in.
+    MAX_CONCEAL = 50
     link_re = re.compile(r"\[([^\]]*)\]\([^)]*\)")
     wrapped_lines = []
     for line in markdown.split("\n"):
@@ -196,19 +226,29 @@ def postprocess(markdown: str) -> str:
             placeholders = {}
 
             def _replace(m, _ph=placeholders):
-                # Placeholder sized to the link *text* (the concealed
-                # display width), padded with non-space chars so textwrap
-                # treats it as one word.
                 idx = len(_ph)
-                display_len = max(len(m.group(1)), 1)
-                key = f"\x00{idx}\x00".ljust(display_len, "\x01")
-                _ph[key] = m.group(0)
+                link_text = m.group(1)
+                full_link = m.group(0)
+                # Strip bold/italic markers for true display width.
+                display_text = re.sub(r'\*+|_+', '', link_text)
+                display_len = max(len(display_text), 1)
+                # Cap concealment so very long URLs still trigger wrapping.
+                concealed = len(full_link) - display_len
+                effective_len = display_len + max(0, concealed - MAX_CONCEAL)
+                key = f"\x00{idx}\x00".ljust(effective_len, "\x01")
+                _ph[key] = full_link
                 return key
 
             masked = link_re.sub(_replace, line)
+
+            # Bold/italic markers are also concealed — widen the target
+            # so they don't eat into the visible 100-char budget.
+            marker_chars = sum(len(m) for m in re.findall(r'\*+|_+', masked))
+            effective_width = 100 + marker_chars
+
             wrapped = textwrap.wrap(
                 masked,
-                width=100,
+                width=effective_width,
                 break_long_words=False,
                 break_on_hyphens=False,
                 subsequent_indent=cont_indent,

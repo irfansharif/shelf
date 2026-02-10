@@ -14,6 +14,18 @@ import (
 	"github.com/irfansharif/shelf/pkg/images"
 )
 
+var multiHyphenRe = regexp.MustCompile(`-+`)
+
+// ErrArticleExists is returned when saving an article whose slug already exists.
+type ErrArticleExists struct {
+	Slug  string
+	Title string // title of the existing article
+}
+
+func (e *ErrArticleExists) Error() string {
+	return fmt.Sprintf("article already exists: %s", e.Slug)
+}
+
 // Article represents a saved article with its content.
 type Article struct {
 	Meta    ArticleMeta
@@ -141,7 +153,9 @@ func (s *Store) scan() error {
 	return nil
 }
 
-// Save stores an article and updates the cache.
+// Save stores an article and updates the cache. If an article with the same
+// slug already exists, it returns *ErrArticleExists. Use SaveForce to
+// overwrite.
 func (s *Store) Save(article *Article) error {
 	if article.Meta.SavedAt.IsZero() {
 		article.Meta.SavedAt = time.Now()
@@ -149,6 +163,34 @@ func (s *Store) Save(article *Article) error {
 
 	slug := generateDirName(article.Meta.Title)
 	dirPath := filepath.Join(s.basePath, "articles", slug)
+
+	if _, err := os.Stat(dirPath); err == nil {
+		// Directory already exists — find the title of the existing article.
+		existingTitle := slug
+		if data, err := os.ReadFile(filepath.Join(dirPath, "index.md")); err == nil {
+			if t, _, _, _, _, _, err := parseFrontMatter(string(data)); err == nil && t != "" {
+				existingTitle = t
+			}
+		}
+		return &ErrArticleExists{Slug: slug, Title: existingTitle}
+	}
+
+	return s.save(article, slug, dirPath)
+}
+
+// SaveForce stores an article, overwriting any existing article with the same
+// slug.
+func (s *Store) SaveForce(article *Article) error {
+	if article.Meta.SavedAt.IsZero() {
+		article.Meta.SavedAt = time.Now()
+	}
+
+	slug := generateDirName(article.Meta.Title)
+	dirPath := filepath.Join(s.basePath, "articles", slug)
+	return s.save(article, slug, dirPath)
+}
+
+func (s *Store) save(article *Article, slug, dirPath string) error {
 	if err := os.MkdirAll(dirPath, 0755); err != nil {
 		return fmt.Errorf("creating article directory: %w", err)
 	}
@@ -303,8 +345,7 @@ func slugify(s string) string {
 	}
 
 	// Remove multiple consecutive hyphens
-	re := regexp.MustCompile(`-+`)
-	slug = re.ReplaceAllString(slug, "-")
+	slug = multiHyphenRe.ReplaceAllString(slug, "-")
 
 	if slug == "" {
 		slug = "untitled"

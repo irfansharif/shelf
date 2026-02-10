@@ -14,12 +14,11 @@ import (
 	"time"
 
 	"github.com/cockroachdb/datadriven"
-	"github.com/irfansharif/shelf/pkg/markdown"
 )
 
 var defaultEndpoints = map[string]string{
-	"model": "https://irfansharif--shelf-readerlm-convert.modal.run",
-	"api":   "https://irfansharif--shelf-jina-readerlm-convert.modal.run",
+	"model": "https://irfansharif--shelf-model-converter-convert.modal.run",
+	"api":   "https://irfansharif--shelf-api-converter-convert.modal.run",
 }
 
 func endpointURL(app string) string {
@@ -110,12 +109,16 @@ func cmdConvert(t *testing.T, d *datadriven.TestData, state *string) string {
 		d.Fatalf(t, "HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	var mdContent string
-	if err := json.NewDecoder(resp.Body).Decode(&mdContent); err != nil {
+	var result struct {
+		Title    string `json:"title"`
+		Author   string `json:"author"`
+		Markdown string `json:"markdown"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		d.Fatalf(t, "decoding response: %v", err)
 	}
 
-	*state = mdContent
+	*state = result.Markdown
 	return ""
 }
 
@@ -152,7 +155,6 @@ func cmdLoad(t *testing.T, d *datadriven.TestData, state *string) string {
 
 func cmdProcess(t *testing.T, d *datadriven.TestData, state *string) string {
 	t.Helper()
-	*state = markdown.Process(*state)
 	return ""
 }
 
