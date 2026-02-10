@@ -47,7 +47,9 @@ type Model struct {
 	spinner     spinner.Model
 
 	// Overwrite confirmation
-	pendingResult *extractor.ExtractResult
+	pendingResult  *extractor.ExtractResult // post-fetch slug collision
+	overwritePath  string                   // pre-fetch URL match: file path to delete
+	overwriteTitle string                   // pre-fetch URL match: title for display
 
 	// Status
 	err        error
@@ -118,6 +120,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for i, img := range msg.result.Images {
 			images[i] = storage.ImageFile{Path: img.Path, Data: img.Data}
 		}
+		// If overwriting a URL-matched article, delete old first.
+		if m.overwritePath != "" {
+			_ = m.store.Delete(m.overwritePath)
+			m.overwritePath = ""
+			m.overwriteTitle = ""
+		}
 		if err := m.store.SaveContent(msg.result.Title, msg.result.Content, images); err != nil {
 			var existsErr *storage.ErrArticleExists
 			if errors.As(err, &existsErr) {
@@ -132,9 +140,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateList
 		m.pendingResult = nil
 		m.articles = m.store.List()
-		m.statusMsg = fmt.Sprintf("Saved: %s", msg.result.Title)
 		m.err = nil
-		return m, nil
+		for i, a := range m.articles {
+			if a.Title == msg.result.Title {
+				m.cursor = i
+				break
+			}
+		}
+		return m.openSelectedArticle()
 
 	case extractionErrMsg:
 		m.state = stateList
@@ -255,16 +268,23 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case key.Matches(msg, m.keys.Reload):
-		if err := m.store.Reload(); err != nil {
-			m.err = err
+		if len(m.articles) == 0 || m.cursor >= len(m.articles) {
 			return m, nil
 		}
-		m.articles = m.store.List()
-		if m.cursor >= len(m.articles) {
-			m.cursor = max(0, len(m.articles)-1)
+		article := m.articles[m.cursor]
+		if article.SourceURL == "" {
+			m.err = fmt.Errorf("no source URL for %q", article.Title)
+			return m, nil
 		}
-		m.statusMsg = fmt.Sprintf("Reloaded %d articles", len(m.articles))
-		return m, nil
+		// Pre-fill the URL bar and go straight to fetching.
+		m.urlInput = m.urlInput.SetValue(article.SourceURL)
+		m.overwritePath = article.FilePath
+		m.overwriteTitle = article.Title
+		m.state = stateLoading
+		return m, tea.Batch(
+			m.spinner.Tick,
+			m.extractArticle(article.SourceURL),
+		)
 	}
 
 	return m, nil
@@ -289,6 +309,15 @@ func (m Model) handleAddURLKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if url == "" {
 			m.state = stateList
 			return m, nil
+		}
+		// Check if an article from this URL already exists.
+		for _, a := range m.store.List() {
+			if a.SourceURL == url {
+				m.state = stateConfirmOverwrite
+				m.overwritePath = a.FilePath
+				m.overwriteTitle = a.Title
+				return m, nil
+			}
 		}
 		m.state = stateLoading
 		return m, tea.Batch(
@@ -354,26 +383,42 @@ func (m Model) extractArticle(url string) tea.Cmd {
 func (m Model) handleConfirmOverwriteKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
-		images := make([]storage.ImageFile, len(m.pendingResult.Images))
-		for i, img := range m.pendingResult.Images {
-			images[i] = storage.ImageFile{Path: img.Path, Data: img.Data}
-		}
-		if err := m.store.SaveContentForce(m.pendingResult.Title, m.pendingResult.Content, images); err != nil {
+		if m.pendingResult != nil {
+			// Post-fetch slug collision: force save.
+			images := make([]storage.ImageFile, len(m.pendingResult.Images))
+			for i, img := range m.pendingResult.Images {
+				images[i] = storage.ImageFile{Path: img.Path, Data: img.Data}
+			}
+			if err := m.store.SaveContentForce(m.pendingResult.Title, m.pendingResult.Content, images); err != nil {
+				m.state = stateList
+				m.err = err
+				m.pendingResult = nil
+				return m, nil
+			}
 			m.state = stateList
-			m.err = err
+			m.articles = m.store.List()
+			m.err = nil
+			for i, a := range m.articles {
+				if a.Title == m.pendingResult.Title {
+					m.cursor = i
+					break
+				}
+			}
 			m.pendingResult = nil
-			return m, nil
+			return m.openSelectedArticle()
 		}
-		m.state = stateList
-		m.articles = m.store.List()
-		m.statusMsg = fmt.Sprintf("Saved: %s", m.pendingResult.Title)
-		m.pendingResult = nil
-		m.err = nil
-		return m, nil
+		// Pre-fetch URL match: proceed to fetch (overwritePath stays set).
+		url := strings.TrimSpace(m.urlInput.Value())
+		m.state = stateLoading
+		return m, tea.Batch(
+			m.spinner.Tick,
+			m.extractArticle(url),
+		)
 	case "n", "N", "esc":
 		m.state = stateList
 		m.pendingResult = nil
-		m.statusMsg = "Save cancelled"
+		m.overwritePath = ""
+		m.overwriteTitle = ""
 		return m, nil
 	}
 	return m, nil
@@ -437,27 +482,36 @@ func (m Model) View() string {
 	total := m.store.Count()
 	filtered := len(m.articles)
 	sb.WriteString(m.styles.Header.Render("Articles"))
-	if m.searchInput.Value() != "" {
-		sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" (%d of %d of %d)", m.cursor+1, filtered, total)))
-	} else {
-		sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" (%d of %d)", m.cursor+1, total)))
+	if m.state != stateAddURL && m.state != stateLoading && m.state != stateConfirmOverwrite {
+		if m.searchInput.Value() != "" {
+			sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" (%d of %d of %d)", m.cursor+1, filtered, total)))
+		} else {
+			sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" (%d of %d)", m.cursor+1, total)))
+		}
 	}
 	sb.WriteString("\n\n")
 
-	// Search bar
-	sb.WriteString(m.searchInput.View())
+	// Search bar (replaced by URL input when adding/loading)
+	if m.state == stateAddURL || m.state == stateLoading || m.state == stateConfirmOverwrite {
+		sb.WriteString(m.urlInput.View())
+	} else {
+		sb.WriteString(m.searchInput.View())
+	}
 	sb.WriteString("\n\n")
 
 	// Main content area
 	switch m.state {
 	case stateAddURL:
-		sb.WriteString(m.urlInput.View())
+		// Nothing below the URL input bar
 	case stateLoading:
 		sb.WriteString(m.spinner.View())
 		sb.WriteString(" Fetching article...")
 	case stateConfirmOverwrite:
-		title := m.pendingResult.Title
-		sb.WriteString(fmt.Sprintf("Article %q already exists. Overwrite? [y/n]", title))
+		if m.pendingResult != nil {
+			sb.WriteString(fmt.Sprintf("Article %q already exists. Overwrite? [y/n]", m.pendingResult.Title))
+		} else {
+			sb.WriteString(fmt.Sprintf("Already saved as %q. Re-fetch? [y/n]", m.overwriteTitle))
+		}
 	default:
 		sb.WriteString(m.renderList())
 	}
@@ -538,9 +592,9 @@ func (m Model) renderHelp() string {
 
 	switch m.state {
 	case stateAddURL:
-		parts = append(parts, "[enter] fetch", "[esc] cancel")
+		parts = append(parts, "[enter] fetch", "[ctrl+c] clear", "[esc] cancel")
 	case stateSearch:
-		parts = append(parts, "[enter] done", "[esc] clear")
+		parts = append(parts, "[enter] done", "[ctrl+c] clear", "[esc] clear")
 	case stateConfirmOverwrite:
 		parts = append(parts, "[y] overwrite", "[n] cancel")
 	default:
@@ -549,7 +603,7 @@ func (m Model) renderHelp() string {
 			"[enter] open in neovim",
 			"[d]elete",
 			"[/] search",
-			"[r]eload",
+			"[r]efetch",
 			"[q]uit",
 		)
 	}

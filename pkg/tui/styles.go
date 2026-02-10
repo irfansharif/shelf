@@ -35,9 +35,10 @@ type Styles struct {
 	Tag lipgloss.Style
 
 	// Search styles
-	SearchBox     lipgloss.Style
-	SearchPrompt  lipgloss.Style
-	SearchPlaceholder lipgloss.Style
+	SearchBox          lipgloss.Style
+	SearchBoxActive    lipgloss.Style
+	SearchPrompt       lipgloss.Style
+	SearchPlaceholder  lipgloss.Style
 }
 
 // DefaultStyles returns the default style configuration using Solarized colors.
@@ -127,6 +128,11 @@ func DefaultStyles() Styles {
 			Foreground(green),
 
 		SearchBox: lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(body).
+			Padding(0, 1),
+
+		SearchBoxActive: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(yellow).
 			Padding(0, 1),
