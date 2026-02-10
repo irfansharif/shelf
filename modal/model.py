@@ -1,5 +1,7 @@
 """
 Model-based HTML-to-Markdown conversion (ReaderLM-v2 1.5B on H100).
+
+Uses curl_cffi for browser-like TLS fingerprinting to avoid bot detection.
 """
 
 import modal
@@ -7,7 +9,7 @@ import modal
 MINUTES = 60
 MODEL_NAME = "jinaai/ReaderLM-v2"
 
-app = modal.App("shelf")
+app = modal.App("shelf-model")
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.8.0-devel-ubuntu22.04", add_python="3.12")
@@ -16,12 +18,19 @@ image = (
         "vllm==0.13.0",
         "huggingface-hub==0.36.0",
         "readability-lxml", "lxml[html_clean]",
+        "curl_cffi",
     )
     .add_local_file("lib.py", "/root/lib.py")
 )
 
 hf_cache_vol = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
 vllm_cache_vol = modal.Volume.from_name("vllm-cache", create_if_missing=True)
+
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 @app.cls(
@@ -35,7 +44,7 @@ vllm_cache_vol = modal.Volume.from_name("vllm-cache", create_if_missing=True)
     },
     max_containers=1,
 )
-class ReaderLM:
+class Converter:
     @modal.enter()
     def load(self):
         import vllm
@@ -45,39 +54,30 @@ class ReaderLM:
         self.sampling_params.max_tokens = 16384
         self.sampling_params.temperature = 0
 
-    def _clean_html(self, html: str) -> str:
+    def _convert(self, raw_html: str) -> dict:
         import re
-        # Remove scripts, styles, meta/link tags, and comments before readability.
-        # Recommended by https://huggingface.co/jinaai/ReaderLM-v2
-        html = re.sub(r"<[ ]*script.*?/[ ]*script[ ]*>", "", html,
-                      flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
-        html = re.sub(r"<[ ]*style.*?/[ ]*style[ ]*>", "", html,
-                      flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
-        html = re.sub(r"<[ ]*meta.*?>", "", html,
-                      flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
-        html = re.sub(r"<[ ]*!--.*?--[ ]*>", "", html,
-                      flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
-        html = re.sub(r"<[ ]*link.*?>", "", html,
-                      flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
-        # Strip base64-encoded images (large data URIs waste tokens).
-        html = re.sub(r'<img[^>]+src="data:image/[^;]+;base64,[^"]+"[^>]*>',
-                      '<img src="#"/>', html)
-        # Collapse SVGs to placeholders.
-        html = re.sub(r"(<svg[^>]*>)(.*?)(</svg>)",
-                      r"\1\3", html, flags=re.DOTALL)
-        return html
-
-    def _extract_article(self, html: str) -> tuple:
-        from readability import Document
-        doc = Document(html)
-        return doc.summary(), doc.short_title()
-
-    def _convert(self, html: str) -> str:
         import time
+        from html import unescape
+
+        from readability import Document
+
+        from lib import clean_html, fix_headings, postprocess
 
         t0 = time.perf_counter()
-        cleaned_html = self._clean_html(html)
-        article_html, _ = self._extract_article(cleaned_html)
+
+        # Extract metadata from raw HTML.
+        title_m = re.search(r"(?is)<title[^>]*>(.*?)</title>", raw_html)
+        title = unescape(title_m.group(1).strip()) if title_m else ""
+        author_m = re.search(
+            r'(?i)<meta[^>]+name=["\']author["\'][^>]+content=["\']([^"\']+)["\']',
+            raw_html,
+        )
+        author = unescape(author_m.group(1).strip()) if author_m else ""
+
+        # Clean and extract article.
+        cleaned_html = clean_html(raw_html, strip_data_uris=True)
+        doc = Document(cleaned_html)
+        article_html = doc.summary()
         t_extract = time.perf_counter()
 
         max_chars = 65000
@@ -106,45 +106,31 @@ class ReaderLM:
         print(f"[instrumentation] input_tokens={n_input}, output_tokens={n_output}")
         print(f"[instrumentation] extract={t_extract - t0:.3f}s, prompt_build={t_tokenize - t_extract:.3f}s, generate={gen_time:.3f}s, total={total:.3f}s")
         print(f"[instrumentation] generate throughput: {n_output / gen_time:.1f} tok/s")
-        # Dump full structure of vLLM output objects (excluding large token/text fields).
-        def _dump(obj, name):
-            attrs = {}
-            for k in sorted(dir(obj)):
-                if k.startswith("_"):
-                    continue
-                v = getattr(obj, k, None)
-                if callable(v):
-                    continue
-                if k in ("text", "prompt", "prompt_token_ids", "token_ids"):
-                    attrs[k] = f"<{type(v).__name__}, len={len(v) if v else 0}>"
-                else:
-                    attrs[k] = repr(v)
-            print(f"[instrumentation] {name}:")
-            for k, v in attrs.items():
-                print(f"  {k} = {v}")
-        _dump(req_output, "RequestOutput")
-        _dump(comp_output, "CompletionOutput")
 
         # Strip ```markdown fences before heading injection so the title
         # lands at the true start of the text (postprocess anchors on ^/$).
-        import re as _re
-        result = _re.sub(r"^```\s*(?:markdown)?\s*\n?", "", result)
-        result = _re.sub(r"\n?```\s*$", "", result)
-        from lib import fix_headings, postprocess
+        result = re.sub(r"^```\s*(?:markdown)?\s*\n?", "", result)
+        result = re.sub(r"\n?```\s*$", "", result)
         result = fix_headings(cleaned_html, result)
         result = postprocess(result)
-        return result
+        return {"title": title, "author": author, "markdown": result}
 
     @modal.fastapi_endpoint(method="POST")
     def convert(self, data: dict):
-        import urllib.request
         from fastapi.responses import JSONResponse
+
+        from curl_cffi import requests as cffi_requests
+
         try:
             url = data["url"]
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req) as resp:
-                html = resp.read().decode("utf-8")
-            return self._convert(html)
+            resp = cffi_requests.get(
+                url,
+                headers=BROWSER_HEADERS,
+                timeout=60,
+                impersonate="chrome",
+            )
+            resp.raise_for_status()
+            return self._convert(resp.text)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -154,14 +140,14 @@ class ReaderLM:
             )
 
     @modal.method()
-    def html_to_markdown(self, html: str) -> str:
-        return self._convert(html)
+    def url_to_markdown(self, url: str) -> dict:
+        from curl_cffi import requests as cffi_requests
 
-    @modal.method()
-    def url_to_markdown(self, url: str) -> str:
-        import urllib.request
-
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req) as resp:
-            html = resp.read().decode("utf-8")
-        return self._convert(html)
+        resp = cffi_requests.get(
+            url,
+            headers=BROWSER_HEADERS,
+            timeout=60,
+            impersonate="chrome",
+        )
+        resp.raise_for_status()
+        return self._convert(resp.text)

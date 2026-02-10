@@ -47,12 +47,10 @@ func DefaultStyles() Styles {
 	base00 := lipgloss.Color("#657b83") // body text (light bg)
 	base0 := lipgloss.Color("#839496")  // body text (dark bg)
 	base1 := lipgloss.Color("#93a1a1")  // emphasized content
-	base3 := lipgloss.Color("#fdf6e3")  // vanilla white
 
 	subtle := lipgloss.AdaptiveColor{Light: string(base01), Dark: string(base01)}
 	body := lipgloss.AdaptiveColor{Light: string(base00), Dark: string(base0)}
 	emphasis := lipgloss.AdaptiveColor{Light: string(base00), Dark: string(base1)}
-	text := lipgloss.AdaptiveColor{Light: string(base00), Dark: string(base3)}
 
 	// Solarized accents
 	yellow := lipgloss.Color("#b58900")
@@ -68,8 +66,7 @@ func DefaultStyles() Styles {
 			Foreground(orange),
 
 		Footer: lipgloss.NewStyle().
-			Foreground(subtle).
-			MarginTop(1),
+			Foreground(subtle),
 
 		ListTitle: lipgloss.NewStyle().
 			Bold(true).
@@ -79,7 +76,7 @@ func DefaultStyles() Styles {
 			PaddingLeft(2),
 
 		ListItemTitle: lipgloss.NewStyle().
-			Foreground(text),
+			Foreground(body),
 
 		ListItemDesc: lipgloss.NewStyle().
 			Foreground(subtle),

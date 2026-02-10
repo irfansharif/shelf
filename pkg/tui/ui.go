@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,6 +23,7 @@ const (
 	stateAddURL
 	stateLoading
 	stateSearch
+	stateConfirmOverwrite
 )
 
 // Model is the main TUI model.
@@ -44,6 +46,9 @@ type Model struct {
 	searchInput SearchInputModel
 	spinner     spinner.Model
 
+	// Overwrite confirmation
+	pendingArticle *storage.Article
+
 	// Status
 	err        error
 	statusMsg  string
@@ -52,9 +57,9 @@ type Model struct {
 // Messages
 type (
 	articlesFetchedMsg struct{ articles []storage.ArticleMeta }
-	articleSavedMsg    struct{ meta storage.ArticleMeta }
-	articleDeletedMsg  struct{ id string }
-	extractionErrMsg   struct{ err error }
+	articleExtractedMsg struct{ article *storage.Article }
+	articleDeletedMsg   struct{ id string }
+	extractionErrMsg    struct{ err error }
 	editorFinishedMsg  struct{ err error }
 	clearStatusMsg     struct{}
 )
@@ -108,10 +113,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case articleSavedMsg:
+	case articleExtractedMsg:
+		if err := m.store.Save(msg.article); err != nil {
+			var existsErr *storage.ErrArticleExists
+			if errors.As(err, &existsErr) {
+				m.state = stateConfirmOverwrite
+				m.pendingArticle = msg.article
+				return m, nil
+			}
+			m.state = stateList
+			m.err = err
+			return m, nil
+		}
 		m.state = stateList
+		m.pendingArticle = nil
 		m.articles = m.store.List()
-		m.statusMsg = fmt.Sprintf("Saved: %s", msg.meta.Title)
+		m.statusMsg = fmt.Sprintf("Saved: %s", msg.article.Meta.Title)
 		m.err = nil
 		return m, nil
 
@@ -180,7 +197,13 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, nil
+	case stateConfirmOverwrite:
+		return m.handleConfirmOverwriteKeys(msg)
 	}
+
+	// Any keypress in the list clears a previous status/error toast.
+	m.statusMsg = ""
+	m.err = nil
 
 	// List state keys
 	switch {
@@ -258,7 +281,7 @@ func (m Model) handleAddURLKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state = stateLoading
 		return m, tea.Batch(
 			m.spinner.Tick,
-			m.extractAndSave(url),
+			m.extractArticle(url),
 		)
 	}
 
@@ -295,20 +318,40 @@ func (m Model) handleSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m Model) extractAndSave(url string) tea.Cmd {
+func (m Model) extractArticle(url string) tea.Cmd {
 	return func() tea.Msg {
 		article, err := m.extract.Extract(url)
 		if err != nil {
 			return extractionErrMsg{err: err}
 		}
-
-		if err := m.store.Save(article); err != nil {
-			return extractionErrMsg{err: err}
-		}
-
-		return articleSavedMsg{meta: article.Meta}
+		return articleExtractedMsg{article: article}
 	}
 }
+
+func (m Model) handleConfirmOverwriteKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		if err := m.store.SaveForce(m.pendingArticle); err != nil {
+			m.state = stateList
+			m.err = err
+			m.pendingArticle = nil
+			return m, nil
+		}
+		m.state = stateList
+		m.articles = m.store.List()
+		m.statusMsg = fmt.Sprintf("Saved: %s", m.pendingArticle.Meta.Title)
+		m.pendingArticle = nil
+		m.err = nil
+		return m, nil
+	case "n", "N", "esc":
+		m.state = stateList
+		m.pendingArticle = nil
+		m.statusMsg = "Save cancelled"
+		return m, nil
+	}
+	return m, nil
+}
+
 
 func (m Model) openSelectedArticle() (tea.Model, tea.Cmd) {
 	if len(m.articles) == 0 || m.cursor >= len(m.articles) {
@@ -385,6 +428,9 @@ func (m Model) View() string {
 	case stateLoading:
 		sb.WriteString(m.spinner.View())
 		sb.WriteString(" Fetching article...")
+	case stateConfirmOverwrite:
+		title := m.pendingArticle.Meta.Title
+		sb.WriteString(fmt.Sprintf("Article %q already exists. Overwrite? [y/n]", title))
 	default:
 		sb.WriteString(m.renderList())
 	}
@@ -401,9 +447,9 @@ func (m Model) View() string {
 	content := sb.String()
 	contentHeight := strings.Count(content, "\n") + 1
 	appPaddingV := 2 // Top + bottom padding from App style
-	footerLines := 1 // Help text
+	footerLines := 2 // Help text + blank line above it
 	if statusLine != "" {
-		footerLines += 2 // Status line + blank line separating it from help
+		footerLines++ // Status line replaces the blank line
 	}
 	remaining := m.height - contentHeight - appPaddingV - footerLines
 	if remaining > 0 {
@@ -412,6 +458,8 @@ func (m Model) View() string {
 
 	if statusLine != "" {
 		sb.WriteString(statusLine)
+		sb.WriteString("\n")
+	} else {
 		sb.WriteString("\n")
 	}
 	sb.WriteString(m.styles.Footer.Render(m.renderHelp()))
@@ -466,6 +514,8 @@ func (m Model) renderHelp() string {
 		parts = append(parts, "[enter] fetch", "[esc] cancel")
 	case stateSearch:
 		parts = append(parts, "[enter] done", "[esc] clear")
+	case stateConfirmOverwrite:
+		parts = append(parts, "[y] overwrite", "[n] cancel")
 	default:
 		parts = append(parts,
 			"[a]dd URL",
@@ -478,11 +528,4 @@ func (m Model) renderHelp() string {
 	}
 
 	return strings.Join(parts, "  ")
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

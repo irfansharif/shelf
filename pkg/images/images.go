@@ -80,6 +80,9 @@ func DownloadAndRewrite(content string, imagesDir string) string {
 			continue
 		}
 		alt := result[loc[2]:loc[3]]
+		if alt == "" {
+			alt = strings.TrimSuffix(filename, filepath.Ext(filename))
+		}
 		replacement := fmt.Sprintf("![%s](images/%s)", alt, filename)
 		result = result[:loc[0]] + replacement + result[loc[1]:]
 	}
@@ -133,8 +136,15 @@ func localFilename(rawURL string, used map[string]bool) string {
 	}
 }
 
-func downloadFile(client *http.Client, url, destPath string) error {
-	resp, err := client.Get(url)
+func downloadFile(client *http.Client, rawURL, destPath string) error {
+	req, err := http.NewRequest("GET", rawURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
