@@ -58,9 +58,15 @@ class Converter:
         raw_html = resp.text
         t_html = time.perf_counter()
 
-        # Extract metadata.
+        # Extract metadata.  Prefer <h1> over <title> for the article title
+        # because <title> often includes site branding (e.g. "Post – example.com").
         title_m = re.search(r"(?is)<title[^>]*>(.*?)</title>", raw_html)
         title = unescape(title_m.group(1).strip()) if title_m else ""
+        h1_m = re.search(r"(?is)<h1[^>]*>(.*?)</h1>", raw_html)
+        if h1_m:
+            h1_text = unescape(re.sub(r"<[^>]+>", "", h1_m.group(1)).strip())
+            if h1_text:
+                title = h1_text
         author_m = re.search(
             r'(?i)<meta[^>]+name=["\']author["\'][^>]+content=["\']([^"\']+)["\']',
             raw_html,

@@ -189,8 +189,7 @@ def postprocess(markdown: str) -> str:
     """Normalize quotes, strip code fences, and wrap lines at 100 chars."""
 
     # Normalize curly quotes/apostrophes to straight ones.
-    markdown = markdown.replace("\u2018", "'").replace("\u2019", "'")
-    markdown = markdown.replace("\u201c", '"').replace("\u201d", '"')
+    markdown = _normalize_quotes(markdown)
 
     # Strip ```markdown / ``` fences.
     markdown = re.sub(r"^```\s*(?:markdown)?\s*\n?", "", markdown)
@@ -199,15 +198,52 @@ def postprocess(markdown: str) -> str:
     # Collapse runs of 3+ newlines into 2 (single blank line).
     markdown = re.sub(r"\n{3,}", "\n\n", markdown)
 
+    # Re-join soft-wrapped paragraph lines before re-wrapping.
+    # Conversion tools (or HTML source whitespace) may break paragraphs into
+    # short lines; joining them lets the wrapping below target the correct
+    # display width.  Only consecutive non-indented, non-structural lines are
+    # joined — headings, lists, blockquotes, code fences, etc. are preserved.
+    _structural_re = re.compile(
+        r'^(?:'
+        r'#{1,6}\s'        # heading
+        r'|---+\s*$'       # horizontal rule
+        r'|>'              # blockquote
+        r'|\|'             # table
+        r'|!\['            # image
+        r'|```'            # code fence
+        r'|\s*[-*+]\s+'   # unordered list
+        r'|\s*\d+[.)]\s+' # ordered list
+        r')'
+    )
+    rejoined = []
+    para_buf = []
+    in_code_fence = False
+    for line in markdown.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith('```'):
+            if para_buf:
+                rejoined.append(" ".join(para_buf))
+                para_buf = []
+            rejoined.append(line)
+            in_code_fence = not in_code_fence
+        elif in_code_fence:
+            rejoined.append(line)
+        elif stripped and not line[0].isspace() and not _structural_re.match(line):
+            para_buf.append(line)
+        else:
+            if para_buf:
+                rejoined.append(" ".join(para_buf))
+                para_buf = []
+            rejoined.append(line)
+    if para_buf:
+        rejoined.append(" ".join(para_buf))
+    markdown = "\n".join(rejoined)
+
     # Wrap text body at 100 chars (display width).
     # With vim conceallevel=2, [text](url) displays as just "text" and
-    # bold/italic markers (**,*) are hidden. Use the link text length as the
-    # placeholder width so wrapping targets the displayed width.
-    #
-    # To prevent very long raw lines when URLs are long, cap the amount of
-    # concealment per link to MAX_CONCEAL chars. Any URL syntax beyond that
-    # budget still counts toward the line width, causing wrapping to kick in.
-    MAX_CONCEAL = 50
+    # bold/italic markers (**,*) are hidden. Replace each markdown link with
+    # a placeholder whose width equals the displayed link text length, so
+    # textwrap targets the visual width rather than the raw character count.
     link_re = re.compile(r"\[([^\]]*)\]\([^)]*\)")
     wrapped_lines = []
     for line in markdown.split("\n"):
@@ -236,10 +272,7 @@ def postprocess(markdown: str) -> str:
                 # Strip bold/italic markers for true display width.
                 display_text = re.sub(r'\*+|_+', '', link_text)
                 display_len = max(len(display_text), 1)
-                # Cap concealment so very long URLs still trigger wrapping.
-                concealed = len(full_link) - display_len
-                effective_len = display_len + max(0, concealed - MAX_CONCEAL)
-                key = f"\x00{idx}\x00".ljust(effective_len, "\x01")
+                key = f"\x00{idx}\x00".ljust(display_len, "\x01")
                 _ph[key] = full_link
                 return key
 
@@ -399,8 +432,15 @@ def _escape_yaml(s):
     return s
 
 
+def _normalize_quotes(s):
+    """Replace curly quotes/apostrophes with straight ones."""
+    return s.replace("\u2018", "'").replace("\u2019", "'").replace("\u201c", '"').replace("\u201d", '"')
+
+
 def format_article(title, author, source, markdown):
     """Generate complete index.md content with YAML front matter."""
+    title = _normalize_quotes(title)
+    author = _normalize_quotes(author)
     saved = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     lines = ["---"]
     lines.append(f"title: {_escape_yaml(title)}")

@@ -16,6 +16,7 @@ type URLInputModel struct {
 func NewURLInput(styles Styles) URLInputModel {
 	ti := textinput.New()
 	ti.Placeholder = "https://example.com/article"
+	ti.Prompt = ""
 	ti.Focus()
 	ti.CharLimit = 2048
 	ti.Width = 54
@@ -39,15 +40,12 @@ func (m URLInputModel) Update(msg tea.Msg) (URLInputModel, tea.Cmd) {
 	return m, cmd
 }
 
-// View renders the URL input.
+// View renders the URL input as an inline bar matching the search bar style.
 func (m URLInputModel) View() string {
 	boxWidth := m.width - 6
-	box := m.styles.InputBox.Width(boxWidth)
-	return box.Render(
-		m.styles.InputLabel.Render("Add URL") + "\n\n" +
-			m.textInput.View() + "\n\n" +
-			m.styles.Muted.Render("Press Enter to fetch, Esc to cancel"),
-	)
+	icon := m.styles.SearchPrompt.SetString("+ ").Render("")
+	content := icon + m.textInput.View()
+	return m.styles.SearchBoxActive.Width(boxWidth).Render(content)
 }
 
 // Value returns the current input value.
@@ -58,14 +56,20 @@ func (m URLInputModel) Value() string {
 // SetWidth sets the available width for the URL input.
 func (m URLInputModel) SetWidth(w int) URLInputModel {
 	m.width = w
-	// InputBox: Width (content+padding) = w-6, inner content = w-6-4, minus prompt (2)
-	m.textInput.Width = w - 6 - 4 - 2
+	// SearchBoxActive: Width (content+padding) = w-6, inner content = w-6-2, minus icon (2)
+	m.textInput.Width = w - 6 - 2 - 2
 	return m
 }
 
 // Reset clears the input.
 func (m URLInputModel) Reset() URLInputModel {
 	m.textInput.Reset()
+	return m
+}
+
+// SetValue sets the input value.
+func (m URLInputModel) SetValue(s string) URLInputModel {
+	m.textInput.SetValue(s)
 	return m
 }
 
@@ -86,6 +90,7 @@ type SearchInputModel struct {
 func NewSearchInput(styles Styles) SearchInputModel {
 	ti := textinput.New()
 	ti.Placeholder = "Search..."
+	ti.PlaceholderStyle = styles.SearchPlaceholder
 	ti.Prompt = ""
 	ti.CharLimit = 100
 	ti.Width = 40
@@ -128,7 +133,11 @@ func (m SearchInputModel) View() string {
 		content = icon + m.styles.SearchPlaceholder.Render("Search...")
 	}
 
-	return m.styles.SearchBox.Width(boxWidth).Render(content)
+	box := m.styles.SearchBox
+	if m.active {
+		box = m.styles.SearchBoxActive
+	}
+	return box.Width(boxWidth).Render(content)
 }
 
 // Value returns the current search query.
