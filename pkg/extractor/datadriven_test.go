@@ -110,15 +110,18 @@ func cmdConvert(t *testing.T, d *datadriven.TestData, state *string) string {
 	}
 
 	var result struct {
-		Title    string `json:"title"`
-		Author   string `json:"author"`
-		Markdown string `json:"markdown"`
+		Title   string `json:"title"`
+		Content string `json:"content"`
+		Images  []struct {
+			Path string `json:"path"`
+			Data string `json:"data"`
+		} `json:"images"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		d.Fatalf(t, "decoding response: %v", err)
 	}
 
-	*state = result.Markdown
+	*state = result.Content
 	return ""
 }
 

@@ -93,8 +93,16 @@ class Converter:
     def convert(self, data: dict):
         from fastapi.responses import JSONResponse
 
+        from lib import download_images, format_article
+
         try:
-            return self._convert(data["url"])
+            url = data["url"]
+            result = self._convert(url)
+            markdown, images = download_images(result["markdown"])
+            content = format_article(
+                result["title"], result["author"], url, markdown,
+            )
+            return {"title": result["title"], "content": content, "images": images}
         except Exception as e:
             import traceback
 
@@ -106,4 +114,11 @@ class Converter:
 
     @modal.method()
     def url_to_markdown(self, url: str) -> dict:
-        return self._convert(url)
+        from lib import download_images, format_article
+
+        result = self._convert(url)
+        markdown, images = download_images(result["markdown"])
+        content = format_article(
+            result["title"], result["author"], url, markdown,
+        )
+        return {"title": result["title"], "content": content, "images": images}
