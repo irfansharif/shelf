@@ -11,11 +11,13 @@ type KeyMap struct {
 	Bottom key.Binding
 
 	// Actions
-	Open   key.Binding
-	Add    key.Binding
-	Delete key.Binding
-	Search key.Binding
-	Reload key.Binding
+	Open        key.Binding
+	Add         key.Binding
+	Delete      key.Binding
+	Archive     key.Binding
+	ShowArchive key.Binding
+	Search      key.Binding
+	Reload      key.Binding
 
 	// General
 	Quit   key.Binding
@@ -55,6 +57,14 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("d"),
 			key.WithHelp("d", "delete"),
 		),
+		Archive: key.NewBinding(
+			key.WithKeys("x"),
+			key.WithHelp("x", "archive"),
+		),
+		ShowArchive: key.NewBinding(
+			key.WithKeys("X"),
+			key.WithHelp("X", "show archived"),
+		),
 		Search: key.NewBinding(
 			key.WithKeys("/"),
 			key.WithHelp("/", "search"),
@@ -84,14 +94,14 @@ func DefaultKeyMap() KeyMap {
 
 // ShortHelp returns keybindings to show in the short help view.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Add, k.Open, k.Delete, k.Reload, k.Quit}
+	return []key.Binding{k.Add, k.Open, k.Delete, k.Archive, k.ShowArchive, k.Reload, k.Quit}
 }
 
 // FullHelp returns keybindings to show in the full help view.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Top, k.Bottom},
-		{k.Open, k.Add, k.Delete, k.Search, k.Reload},
+		{k.Open, k.Add, k.Delete, k.Archive, k.ShowArchive, k.Search, k.Reload},
 		{k.Quit, k.Cancel, k.Help},
 	}
 }

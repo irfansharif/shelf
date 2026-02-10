@@ -16,7 +16,9 @@ image = (
     .pip_install(
         "curl_cffi",
         "readability-lxml", "lxml[html_clean]", "markdownify",
+        "playwright",
     )
+    .run_commands("playwright install chromium --with-deps")
     .add_local_file("lib.py", "/root/lib.py")
 )
 
@@ -43,7 +45,7 @@ class Converter:
         from markdownify import markdownify
         from readability import Document
 
-        from lib import clean_html, fix_headings, postprocess
+        from lib import clean_html, fetch_with_js, fix_headings, needs_js_rendering, postprocess
 
         t0 = time.perf_counter()
 
@@ -56,6 +58,10 @@ class Converter:
         )
         resp.raise_for_status()
         raw_html = resp.text
+
+        # Fall back to headless browser if the page requires JS rendering.
+        if needs_js_rendering(raw_html):
+            raw_html = fetch_with_js(url)
         t_html = time.perf_counter()
 
         # Extract metadata.  Prefer <h1> over <title> for the article title

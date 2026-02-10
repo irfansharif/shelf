@@ -42,6 +42,11 @@ type ArticleMeta struct {
 	FileSize     int64     // derived from os.Stat
 }
 
+// IsArchived returns true if the article has the "archived" tag.
+func (m ArticleMeta) IsArchived() bool {
+	return hasTag(m.Tags, "archived")
+}
+
 // ImageFile holds image data to be written to disk.
 type ImageFile struct {
 	Path string // relative path, e.g. "images/photo.jpg"
@@ -151,6 +156,10 @@ func (s *Store) scan() error {
 	}
 
 	sort.Slice(s.articles, func(i, j int) bool {
+		ai, aj := s.articles[i].IsArchived(), s.articles[j].IsArchived()
+		if ai != aj {
+			return !ai // non-archived first
+		}
 		return s.articles[i].SavedAt.After(s.articles[j].SavedAt)
 	})
 
@@ -299,6 +308,10 @@ func (s *Store) Search(query string) []ArticleMeta {
 	}
 
 	sort.Slice(results, func(i, j int) bool {
+		ai, aj := results[i].IsArchived(), results[j].IsArchived()
+		if ai != aj {
+			return !ai // non-archived first
+		}
 		return results[i].SavedAt.After(results[j].SavedAt)
 	})
 
@@ -410,6 +423,71 @@ func unescapeYAML(s string) string {
 		s = strings.ReplaceAll(s, `\"`, `"`)
 	}
 	return s
+}
+
+func hasTag(tags []string, tag string) bool {
+	tag = strings.ToLower(tag)
+	for _, t := range tags {
+		if strings.ToLower(t) == tag {
+			return true
+		}
+	}
+	return false
+}
+
+// UpdateTags rewrites the tags line in an article's front matter on disk.
+func (s *Store) UpdateTags(filePath string, tags []string) error {
+	fullPath := filepath.Join(s.basePath, filePath)
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
+		return fmt.Errorf("reading article: %w", err)
+	}
+
+	updated, err := replaceTags(string(content), tags)
+	if err != nil {
+		return err
+	}
+
+	tmpPath := fullPath + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(updated), 0644); err != nil {
+		return fmt.Errorf("writing tmp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, fullPath); err != nil {
+		return fmt.Errorf("renaming tmp file: %w", err)
+	}
+
+	return s.scan()
+}
+
+// replaceTags splices the tags: line in front matter text.
+func replaceTags(content string, tags []string) (string, error) {
+	parts := strings.SplitN(content, "---\n", 3)
+	if len(parts) < 3 || parts[0] != "" {
+		return "", fmt.Errorf("invalid front matter")
+	}
+
+	header := parts[1]
+	body := parts[2]
+
+	tagValue := strings.Join(tags, ", ")
+	newLine := "tags: " + tagValue + "\n"
+
+	var newHeader strings.Builder
+	found := false
+	for _, line := range strings.Split(header, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "tags:") {
+			newHeader.WriteString(newLine)
+			found = true
+		} else if trimmed != "" {
+			newHeader.WriteString(line + "\n")
+		}
+	}
+	if !found {
+		newHeader.WriteString(newLine)
+	}
+
+	return "---\n" + newHeader.String() + "---\n" + body, nil
 }
 
 func calcDirSize(dir string) int64 {

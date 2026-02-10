@@ -8,6 +8,47 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
+# ---------------------------------------------------------------------------
+# JS rendering fallback (Playwright)
+# ---------------------------------------------------------------------------
+
+_JS_REQUIRED_MARKERS = [
+    "javascript is not available",
+    "you need to enable javascript",
+    "please enable javascript",
+    "this app requires javascript",
+    "requires javascript to run",
+    "enable javascript to run this app",
+    "javascript is required",
+    "javascript must be enabled",
+]
+
+
+def needs_js_rendering(html):
+    """Check if HTML suggests the page needs JavaScript to render content."""
+    lower = html.lower()
+    return any(marker in lower for marker in _JS_REQUIRED_MARKERS)
+
+
+def fetch_with_js(url, timeout=30000):
+    """Re-fetch a URL using a headless browser for JS-rendered pages."""
+    import time
+
+    from playwright.sync_api import sync_playwright
+
+    print(f"[js-fallback] fetching with Playwright: {url}")
+    t0 = time.perf_counter()
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page()
+        page.goto(url, timeout=timeout)
+        page.wait_for_timeout(3000)
+        html = page.content()
+        browser.close()
+    elapsed = time.perf_counter() - t0
+    print(f"[js-fallback] done in {elapsed:.1f}s ({len(html)} chars)")
+    return html
+
 
 def clean_html(html: str, *, strip_data_uris: bool = False) -> str:
     """Remove scripts, styles, and other non-content elements.
@@ -215,12 +256,29 @@ def postprocess(markdown: str) -> str:
         r'|\s*\d+[.)]\s+' # ordered list
         r')'
     )
+    # Structural patterns for content inside blockquotes (no blockquote marker).
+    _bq_inner_structural_re = re.compile(
+        r'^(?:'
+        r'#{1,6}\s'        # heading
+        r'|---+\s*$'       # horizontal rule
+        r'|>'              # nested blockquote
+        r'|\|'             # table
+        r'|!\['            # image
+        r'|```'            # code fence
+        r'|\s*[-*+]\s+'   # unordered list
+        r'|\s*\d+[.)]\s+' # ordered list
+        r')'
+    )
     rejoined = []
     para_buf = []
+    bq_buf = []
     in_code_fence = False
     for line in markdown.split("\n"):
         stripped = line.strip()
         if stripped.startswith('```'):
+            if bq_buf:
+                rejoined.append("> " + " ".join(bq_buf))
+                bq_buf = []
             if para_buf:
                 rejoined.append(" ".join(para_buf))
                 para_buf = []
@@ -228,13 +286,34 @@ def postprocess(markdown: str) -> str:
             in_code_fence = not in_code_fence
         elif in_code_fence:
             rejoined.append(line)
+        elif re.match(r'^> ?', line):
+            # Blockquote line — join consecutive paragraph lines within.
+            if para_buf:
+                rejoined.append(" ".join(para_buf))
+                para_buf = []
+            inner = re.match(r'^> ?(.*)', line).group(1)
+            if inner.strip() and not _bq_inner_structural_re.match(inner):
+                bq_buf.append(inner)
+            else:
+                if bq_buf:
+                    rejoined.append("> " + " ".join(bq_buf))
+                    bq_buf = []
+                rejoined.append(line)
         elif stripped and not line[0].isspace() and not _structural_re.match(line):
+            if bq_buf:
+                rejoined.append("> " + " ".join(bq_buf))
+                bq_buf = []
             para_buf.append(line)
         else:
+            if bq_buf:
+                rejoined.append("> " + " ".join(bq_buf))
+                bq_buf = []
             if para_buf:
                 rejoined.append(" ".join(para_buf))
                 para_buf = []
             rejoined.append(line)
+    if bq_buf:
+        rejoined.append("> " + " ".join(bq_buf))
     if para_buf:
         rejoined.append(" ".join(para_buf))
     markdown = "\n".join(rejoined)
@@ -247,17 +326,49 @@ def postprocess(markdown: str) -> str:
     link_re = re.compile(r"\[([^\]]*)\]\([^)]*\)")
     wrapped_lines = []
     for line in markdown.split("\n"):
-        # Don't wrap headings, HRs, blank lines, blockquotes, or tables.
+        # Don't wrap headings, HRs, blank lines, or tables.
         if (
             not line.strip()
             or re.match(r"^#{1,6}\s+", line)
             or re.match(r"^---+\s*$", line)
-            or re.match(r"^>", line)
             or re.match(r"^\|", line)
             or re.match(r"^!\[", line)
             or len(line) <= 100
         ):
             wrapped_lines.append(line)
+        elif re.match(r"^> ?", line):
+            # Wrap blockquote content, preserving the > prefix on each line.
+            bq_m = re.match(r"^(> ?)", line)
+            prefix = "> "
+            inner = line[len(bq_m.group(1)):]
+
+            placeholders = {}
+
+            def _replace_bq(m, _ph=placeholders):
+                idx = len(_ph)
+                link_text = m.group(1)
+                full_link = m.group(0)
+                display_text = re.sub(r'\*+|_+', '', link_text)
+                display_len = max(len(display_text), 1)
+                key = f"\x00{idx}\x00".ljust(display_len, "\x01")
+                _ph[key] = full_link
+                return key
+
+            masked = link_re.sub(_replace_bq, inner)
+            marker_chars = sum(len(m) for m in re.findall(r'\*+|_+', masked))
+            effective_width = 100 - len(prefix) + marker_chars
+
+            wrapped = textwrap.wrap(
+                masked,
+                width=effective_width,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+            for i, wl in enumerate(wrapped):
+                for key, original in placeholders.items():
+                    wl = wl.replace(key, original)
+                wrapped[i] = wl
+            wrapped_lines.extend(prefix + wl for wl in wrapped)
         else:
             # Detect list items to compute continuation indent.
             list_m = re.match(r"^(\s*[\-\*\+]\s+|\s*\d+[.)]\s+)", line)
