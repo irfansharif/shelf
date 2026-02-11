@@ -28,12 +28,6 @@ image = (
 hf_cache_vol = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
 vllm_cache_vol = modal.Volume.from_name("vllm-cache", create_if_missing=True)
 
-BROWSER_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-}
-
 
 @app.cls(
     image=image,
@@ -59,37 +53,25 @@ class Converter:
     def _convert(self, raw_html: str) -> dict:
         import re
         import time
-        from html import unescape
 
-        from readability import Document
-
-        from lib import clean_html, fix_headings, postprocess
+        from lib import clean_html, extract_metadata, postprocess
 
         t0 = time.perf_counter()
 
-        # Extract metadata from raw HTML.
-        title_m = re.search(r"(?is)<title[^>]*>(.*?)</title>", raw_html)
-        title = unescape(title_m.group(1).strip()) if title_m else ""
-        author_m = re.search(
-            r'(?i)<meta[^>]+name=["\']author["\'][^>]+content=["\']([^"\']+)["\']',
-            raw_html,
-        )
-        author = unescape(author_m.group(1).strip()) if author_m else ""
-
-        # Clean and extract article.
+        # Clean HTML and feed the full page to ReaderLM-v2.  The model was
+        # trained to extract main content + metadata from complete pages, so
+        # we skip the readability pre-extraction (which strips headings and
+        # forces a separate regex-based title extraction step).
         cleaned_html = clean_html(raw_html, strip_data_uris=True)
-        doc = Document(cleaned_html)
-        article_html = doc.summary()
+        max_chars = 65000
+        if len(cleaned_html) > max_chars:
+            cleaned_html = cleaned_html[:max_chars]
         t_extract = time.perf_counter()
 
-        max_chars = 65000
-        if len(article_html) > max_chars:
-            article_html = article_html[:max_chars]
         prompt = (
-            "Convert the given HTML to Markdown format. "
-            "Reproduce the text content faithfully — do not add, remove, rephrase, "
-            "or editorialize any text. Do not add headings that are not in the HTML."
-            f"\n```html\n{article_html}\n```"
+            "Extract the main content from the given HTML and convert "
+            "it to Markdown format."
+            f"\n```html\n{cleaned_html}\n```"
         )
         messages = [{"role": "user", "content": prompt}]
         t_tokenize = time.perf_counter()
@@ -104,16 +86,41 @@ class Converter:
         n_output = len(comp_output.token_ids)
         total = t_generate - t0
         gen_time = t_generate - t_tokenize
-        print(f"[instrumentation] raw_html={len(cleaned_html)} chars, article_html={len(article_html)} chars")
+        print(f"[instrumentation] cleaned_html={len(cleaned_html)} chars")
         print(f"[instrumentation] input_tokens={n_input}, output_tokens={n_output}")
         print(f"[instrumentation] extract={t_extract - t0:.3f}s, prompt_build={t_tokenize - t_extract:.3f}s, generate={gen_time:.3f}s, total={total:.3f}s")
         print(f"[instrumentation] generate throughput: {n_output / gen_time:.1f} tok/s")
 
-        # Strip ```markdown fences before heading injection so the title
-        # lands at the true start of the text (postprocess anchors on ^/$).
+        # Strip ```markdown fences.
         result = re.sub(r"^```\s*(?:markdown)?\s*\n?", "", result)
         result = re.sub(r"\n?```\s*$", "", result)
-        result = fix_headings(cleaned_html, result)
+
+        # Parse Title:/Author: metadata headers from model output (the
+        # format ReaderLM-v2 produces with the standard instruction).
+        title, author = "", ""
+        lines = result.split("\n")
+        content_start = 0
+        for i, line in enumerate(lines):
+            if line.startswith("Title: "):
+                title = line[7:].strip()
+                content_start = i + 1
+            elif line.startswith("Author: "):
+                author = line[8:].strip()
+                content_start = i + 1
+            elif line.strip() == "":
+                content_start = i + 1
+            else:
+                break
+        result = "\n".join(lines[content_start:])
+
+        # Fall back to regex-based extraction if the model didn't produce
+        # metadata headers.
+        if not title:
+            print("[metadata] model did not produce Title: header, falling back to regex")
+            title, regex_author = extract_metadata(raw_html)
+            if not author:
+                author = regex_author
+
         result = postprocess(result)
         return {"title": title, "author": author, "markdown": result}
 
@@ -121,30 +128,13 @@ class Converter:
     def convert(self, data: dict):
         from fastapi.responses import JSONResponse
 
-        from curl_cffi import requests as cffi_requests
-        from lib import download_images, fetch_with_js, format_article, needs_js_rendering
+        from lib import build_result, fetch_html
 
         try:
             url = data["url"]
-            resp = cffi_requests.get(
-                url,
-                headers=BROWSER_HEADERS,
-                timeout=60,
-                impersonate="chrome",
-            )
-            resp.raise_for_status()
-            raw_html = resp.text
-
-            # Fall back to headless browser if the page requires JS rendering.
-            if needs_js_rendering(raw_html):
-                raw_html = fetch_with_js(url)
-
+            raw_html = fetch_html(url)
             result = self._convert(raw_html)
-            markdown, images = download_images(result["markdown"])
-            content = format_article(
-                result["title"], result["author"], url, markdown,
-            )
-            return {"title": result["title"], "content": content, "images": images}
+            return build_result(result, url)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -155,25 +145,8 @@ class Converter:
 
     @modal.method()
     def url_to_markdown(self, url: str) -> dict:
-        from curl_cffi import requests as cffi_requests
-        from lib import download_images, fetch_with_js, format_article, needs_js_rendering
+        from lib import build_result, fetch_html
 
-        resp = cffi_requests.get(
-            url,
-            headers=BROWSER_HEADERS,
-            timeout=60,
-            impersonate="chrome",
-        )
-        resp.raise_for_status()
-        raw_html = resp.text
-
-        # Fall back to headless browser if the page requires JS rendering.
-        if needs_js_rendering(raw_html):
-            raw_html = fetch_with_js(url)
-
+        raw_html = fetch_html(url)
         result = self._convert(raw_html)
-        markdown, images = download_images(result["markdown"])
-        content = format_article(
-            result["title"], result["author"], url, markdown,
-        )
-        return {"title": result["title"], "content": content, "images": images}
+        return build_result(result, url)

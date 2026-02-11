@@ -59,3 +59,18 @@ session and update it when you learn something worth preserving — gotchas,
 constraints, things that didn't work, patterns that did. After any reasonably
 sized coding session, review what you encountered and incorporate useful
 learnings before wrapping up. Keep it concise and organized by topic.
+
+
+## Modal Deployment
+
+When deploying Modal apps, work in phases: (1) read all related source files
+and verify interface consistency and no deprecated APIs, (2) deploy and capture
+errors — if deployment fails, fix and retry, (3) regression-test deployed
+endpoints with real inputs and diff outputs before considering it done.
+
+## TUI Changes
+
+For visual/UI changes, work in a build-verify loop: make the edit, build,
+capture a terminal snapshot (e.g. via tmux capture-pane), read it back to
+verify correctness (colors, alignment, no clipping, ANSI-aware widths), and
+iterate until the snapshot matches the spec.
