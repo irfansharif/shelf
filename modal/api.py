@@ -22,12 +22,6 @@ image = (
     .add_local_file("lib.py", "/root/lib.py")
 )
 
-BROWSER_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-}
-
 
 @app.cls(
     image=image,
@@ -37,47 +31,22 @@ BROWSER_HEADERS = {
 )
 class Converter:
     def _convert(self, url: str) -> dict:
-        import re
         import time
-        from html import unescape
 
-        from curl_cffi import requests as cffi_requests
         from markdownify import markdownify
         from readability import Document
 
-        from lib import clean_html, fetch_with_js, fix_headings, needs_js_rendering, postprocess
+        from lib import (
+            clean_html, extract_metadata, fetch_html, fix_headings, postprocess,
+        )
 
         t0 = time.perf_counter()
 
         # Fetch raw HTML.
-        resp = cffi_requests.get(
-            url,
-            headers=BROWSER_HEADERS,
-            timeout=60,
-            impersonate="chrome",
-        )
-        resp.raise_for_status()
-        raw_html = resp.text
-
-        # Fall back to headless browser if the page requires JS rendering.
-        if needs_js_rendering(raw_html):
-            raw_html = fetch_with_js(url)
+        raw_html = fetch_html(url)
         t_html = time.perf_counter()
 
-        # Extract metadata.  Prefer <h1> over <title> for the article title
-        # because <title> often includes site branding (e.g. "Post – example.com").
-        title_m = re.search(r"(?is)<title[^>]*>(.*?)</title>", raw_html)
-        title = unescape(title_m.group(1).strip()) if title_m else ""
-        h1_m = re.search(r"(?is)<h1[^>]*>(.*?)</h1>", raw_html)
-        if h1_m:
-            h1_text = unescape(re.sub(r"<[^>]+>", "", h1_m.group(1)).strip())
-            if h1_text:
-                title = h1_text
-        author_m = re.search(
-            r'(?i)<meta[^>]+name=["\']author["\'][^>]+content=["\']([^"\']+)["\']',
-            raw_html,
-        )
-        author = unescape(author_m.group(1).strip()) if author_m else ""
+        title, author = extract_metadata(raw_html)
 
         # Extract article and convert to markdown.
         doc = Document(raw_html)
@@ -105,16 +74,12 @@ class Converter:
     def convert(self, data: dict):
         from fastapi.responses import JSONResponse
 
-        from lib import download_images, format_article
+        from lib import build_result
 
         try:
             url = data["url"]
             result = self._convert(url)
-            markdown, images = download_images(result["markdown"])
-            content = format_article(
-                result["title"], result["author"], url, markdown,
-            )
-            return {"title": result["title"], "content": content, "images": images}
+            return build_result(result, url)
         except Exception as e:
             import traceback
 
@@ -126,11 +91,7 @@ class Converter:
 
     @modal.method()
     def url_to_markdown(self, url: str) -> dict:
-        from lib import download_images, format_article
+        from lib import build_result
 
         result = self._convert(url)
-        markdown, images = download_images(result["markdown"])
-        content = format_article(
-            result["title"], result["author"], url, markdown,
-        )
-        return {"title": result["title"], "content": content, "images": images}
+        return build_result(result, url)

@@ -5,6 +5,7 @@ import os.path
 import re
 import textwrap
 from datetime import datetime, timezone
+from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
@@ -48,6 +49,75 @@ def fetch_with_js(url, timeout=30000):
     elapsed = time.perf_counter() - t0
     print(f"[js-fallback] done in {elapsed:.1f}s ({len(html)} chars)")
     return html
+
+
+# ---------------------------------------------------------------------------
+# HTML fetching and metadata extraction
+# ---------------------------------------------------------------------------
+
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+def fetch_html(url):
+    """Fetch HTML with browser-like TLS fingerprinting, falling back to JS rendering."""
+    from curl_cffi import requests as cffi_requests
+
+    resp = cffi_requests.get(
+        url,
+        headers=BROWSER_HEADERS,
+        timeout=60,
+        impersonate="chrome",
+    )
+    resp.raise_for_status()
+    raw_html = resp.text
+    if needs_js_rendering(raw_html):
+        raw_html = fetch_with_js(url)
+    return raw_html
+
+
+def extract_metadata(raw_html):
+    """Extract title and author from HTML meta tags and headings.
+
+    Title priority: <h1> > og:title > <title>.
+    """
+    title_m = re.search(r"(?is)<title[^>]*>(.*?)</title>", raw_html)
+    title = unescape(title_m.group(1).strip()) if title_m else ""
+    og_m = re.search(
+        r'(?i)<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+        raw_html,
+    ) or re.search(
+        r'(?i)<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']',
+        raw_html,
+    )
+    if og_m:
+        og_title = unescape(og_m.group(1).strip())
+        if og_title:
+            title = og_title
+    # Find the first h1 whose content isn't entirely a link (nav/masthead
+    # h1 tags are typically <h1><a href="/">Site Name</a></h1>).
+    for h1_m in re.finditer(r"(?is)<h1[^>]*>(.*?)</h1>", raw_html):
+        inner = h1_m.group(1).strip()
+        if re.match(r"(?is)^\s*<a\s[^>]*>.*?</a>\s*$", inner):
+            continue
+        h1_text = unescape(re.sub(r"<[^>]+>", "", inner).strip())
+        if h1_text:
+            title = h1_text
+            break
+    author_m = re.search(
+        r'(?i)<meta[^>]+name=["\']author["\'][^>]+content=["\']([^"\']+)["\']',
+        raw_html,
+    )
+    author = unescape(author_m.group(1).strip()) if author_m else ""
+    return title, author
+
+
+# ---------------------------------------------------------------------------
+# HTML cleaning and conversion helpers
+# ---------------------------------------------------------------------------
 
 
 def clean_html(html: str, *, strip_data_uris: bool = False) -> str:
@@ -153,8 +223,17 @@ def fix_headings(html: str, markdown: str) -> str:
 
     # Filter out nav/boilerplate headings (very short or generic).
     skip = {"ready for more?", "share", "subscribe", ""}
+    # Identify nav-like h1 headings whose content is entirely a link
+    # (e.g. <h1><a href="/">Site Name</a></h1> in mastheads).
+    nav_h1_texts = set()
+    for h1_m in re.finditer(r"(?is)<h1[^>]*>(.*?)</h1>", html):
+        inner = h1_m.group(1).strip()
+        if re.match(r"(?is)^\s*<a\s[^>]*>.*?</a>\s*$", inner):
+            nav_h1_texts.add(re.sub(r"<[^>]+>", "", inner).strip().lower())
     headings = [(lvl, txt, ctx, hr) for lvl, txt, ctx, hr in headings
-                if txt.lower().strip() not in skip and (lvl == 1 or len(ctx) > 20)]
+                if txt.lower().strip() not in skip
+                and txt.lower().strip() not in nav_h1_texts
+                and (lvl == 1 or len(ctx) > 20)]
 
     print(f"[heading-filter] found {len(headings)} content heading(s) in source HTML:")
     for lvl, txt, ctx, hr in headings:
@@ -226,6 +305,43 @@ def fix_headings(html: str, markdown: str) -> str:
     return text
 
 
+_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+
+
+def _mask_links(text):
+    """Replace ``](url)`` with ``\\x01``, leaving ``[`` and link text intact.
+
+    Returns ``(masked_text, urls)`` where *urls* is the list of
+    ``](url)`` strings in left-to-right order.  After ``textwrap``
+    wraps the masked text, call `_restore_links` to put the URLs back.
+    """
+    urls = []
+
+    def _sub(m, _urls=urls):
+        _urls.append(m.group(0)[1 + len(m.group(1)):])   # ](url)
+        return "[" + m.group(1) + "\x01"
+
+    return _LINK_RE.sub(_sub, text), urls
+
+
+def _restore_links(lines, urls):
+    """Replace each ``\\x01`` sentinel with the corresponding ``](url)``.
+
+    Sentinels are consumed left-to-right across all *lines*.
+    """
+    url_iter = iter(urls)
+    out = []
+    for line in lines:
+        parts = []
+        for ch in line:
+            if ch == "\x01":
+                parts.append(next(url_iter))
+            else:
+                parts.append(ch)
+        out.append("".join(parts))
+    return out
+
+
 def postprocess(markdown: str) -> str:
     """Normalize quotes, strip code fences, and wrap lines at 100 chars."""
 
@@ -272,7 +388,17 @@ def postprocess(markdown: str) -> str:
     rejoined = []
     para_buf = []
     bq_buf = []
+    list_buf = []        # accumulates list item + continuation lines
+    list_cont_indent = ""  # whitespace prefix for continuation lines
     in_code_fence = False
+
+    def _flush_list():
+        nonlocal list_buf, list_cont_indent
+        if list_buf:
+            rejoined.append(" ".join(list_buf))
+            list_buf = []
+            list_cont_indent = ""
+
     for line in markdown.split("\n"):
         stripped = line.strip()
         if stripped.startswith('```'):
@@ -282,6 +408,7 @@ def postprocess(markdown: str) -> str:
             if para_buf:
                 rejoined.append(" ".join(para_buf))
                 para_buf = []
+            _flush_list()
             rejoined.append(line)
             in_code_fence = not in_code_fence
         elif in_code_fence:
@@ -291,6 +418,7 @@ def postprocess(markdown: str) -> str:
             if para_buf:
                 rejoined.append(" ".join(para_buf))
                 para_buf = []
+            _flush_list()
             inner = re.match(r'^> ?(.*)', line).group(1)
             if inner.strip() and not _bq_inner_structural_re.match(inner):
                 bq_buf.append(inner)
@@ -299,34 +427,55 @@ def postprocess(markdown: str) -> str:
                     rejoined.append("> " + " ".join(bq_buf))
                     bq_buf = []
                 rejoined.append(line)
-        elif stripped and not line[0].isspace() and not _structural_re.match(line):
-            if bq_buf:
-                rejoined.append("> " + " ".join(bq_buf))
-                bq_buf = []
-            para_buf.append(line)
         else:
-            if bq_buf:
-                rejoined.append("> " + " ".join(bq_buf))
-                bq_buf = []
-            if para_buf:
-                rejoined.append(" ".join(para_buf))
-                para_buf = []
-            rejoined.append(line)
+            list_m = re.match(r'^(\s*[\-\*\+]\s+|\s*\d+[.)]\s+)', line)
+            if list_m:
+                # New list item — flush previous buffers, start list accumulation.
+                if bq_buf:
+                    rejoined.append("> " + " ".join(bq_buf))
+                    bq_buf = []
+                if para_buf:
+                    rejoined.append(" ".join(para_buf))
+                    para_buf = []
+                _flush_list()
+                list_buf = [line]
+                list_cont_indent = " " * len(list_m.group(0))
+            elif (list_buf and stripped
+                  and line.startswith(list_cont_indent)
+                  and not _structural_re.match(stripped)):
+                # Continuation of current list item (indented plain text).
+                list_buf.append(stripped)
+            elif stripped and not line[0].isspace() and not _structural_re.match(line):
+                if bq_buf:
+                    rejoined.append("> " + " ".join(bq_buf))
+                    bq_buf = []
+                _flush_list()
+                para_buf.append(line)
+            else:
+                if bq_buf:
+                    rejoined.append("> " + " ".join(bq_buf))
+                    bq_buf = []
+                if para_buf:
+                    rejoined.append(" ".join(para_buf))
+                    para_buf = []
+                _flush_list()
+                rejoined.append(line)
     if bq_buf:
         rejoined.append("> " + " ".join(bq_buf))
     if para_buf:
         rejoined.append(" ".join(para_buf))
+    _flush_list()
     markdown = "\n".join(rejoined)
 
-    # Wrap text body at 100 chars (display width).
-    # With vim conceallevel=2, [text](url) displays as just "text" and
-    # bold/italic markers (**,*) are hidden. Replace each markdown link with
-    # a placeholder whose width equals the displayed link text length, so
-    # textwrap targets the visual width rather than the raw character count.
-    link_re = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+    # Wrap text body at 100 raw chars.
+    #
+    # We replace ](url) with a 1-char sentinel (\x01), leaving [ and the
+    # link text words in place so textwrap can break between words inside
+    # link text (valid CommonMark).  After wrapping we restore each \x01
+    # to its ](url) in left-to-right order.
     wrapped_lines = []
     for line in markdown.split("\n"):
-        # Don't wrap headings, HRs, blank lines, or tables.
+        # Don't wrap headings, HRs, blank lines, tables, or images.
         if (
             not line.strip()
             or re.match(r"^#{1,6}\s+", line)
@@ -342,70 +491,31 @@ def postprocess(markdown: str) -> str:
             prefix = "> "
             inner = line[len(bq_m.group(1)):]
 
-            placeholders = {}
-
-            def _replace_bq(m, _ph=placeholders):
-                idx = len(_ph)
-                link_text = m.group(1)
-                full_link = m.group(0)
-                display_text = re.sub(r'\*+|_+', '', link_text)
-                display_len = max(len(display_text), 1)
-                key = f"\x00{idx}\x00".ljust(display_len, "\x01")
-                _ph[key] = full_link
-                return key
-
-            masked = link_re.sub(_replace_bq, inner)
-            marker_chars = sum(len(m) for m in re.findall(r'\*+|_+', masked))
-            effective_width = 100 - len(prefix) + marker_chars
-
+            masked, urls = _mask_links(inner)
             wrapped = textwrap.wrap(
                 masked,
-                width=effective_width,
+                width=100 - len(prefix),
                 break_long_words=False,
                 break_on_hyphens=False,
             )
-            for i, wl in enumerate(wrapped):
-                for key, original in placeholders.items():
-                    wl = wl.replace(key, original)
-                wrapped[i] = wl
+            wrapped = _restore_links(wrapped, urls)
             wrapped_lines.extend(prefix + wl for wl in wrapped)
         else:
             # Detect list items to compute continuation indent.
             list_m = re.match(r"^(\s*[\-\*\+]\s+|\s*\d+[.)]\s+)", line)
             cont_indent = " " * len(list_m.group(0)) if list_m else ""
 
-            placeholders = {}
-
-            def _replace(m, _ph=placeholders):
-                idx = len(_ph)
-                link_text = m.group(1)
-                full_link = m.group(0)
-                # Strip bold/italic markers for true display width.
-                display_text = re.sub(r'\*+|_+', '', link_text)
-                display_len = max(len(display_text), 1)
-                key = f"\x00{idx}\x00".ljust(display_len, "\x01")
-                _ph[key] = full_link
-                return key
-
-            masked = link_re.sub(_replace, line)
-
-            # Bold/italic markers are also concealed — widen the target
-            # so they don't eat into the visible 100-char budget.
-            marker_chars = sum(len(m) for m in re.findall(r'\*+|_+', masked))
-            effective_width = 100 + marker_chars
-
+            masked, urls = _mask_links(line)
             wrapped = textwrap.wrap(
                 masked,
-                width=effective_width,
+                width=100,
                 break_long_words=False,
                 break_on_hyphens=False,
                 subsequent_indent=cont_indent,
             )
-            for i, wl in enumerate(wrapped):
-                for key, original in placeholders.items():
-                    wl = wl.replace(key, original)
-                wrapped[i] = wl
+            wrapped = _restore_links(wrapped, urls)
             wrapped_lines.extend(wrapped)
+
     markdown = "\n".join(line.rstrip() for line in wrapped_lines)
 
     # Final trim.
@@ -564,3 +674,10 @@ def format_article(title, author, source, markdown):
     lines.append(markdown.rstrip("\n"))
     lines.append("")
     return "\n".join(lines)
+
+
+def build_result(result, url):
+    """Download images and format article from a conversion result dict."""
+    markdown, images = download_images(result["markdown"])
+    content = format_article(result["title"], result["author"], url, markdown)
+    return {"title": result["title"], "content": content, "images": images}
