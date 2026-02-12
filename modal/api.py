@@ -25,7 +25,7 @@ image = (
 @app.cls(
     image=image,
     scaledown_window=5 * MINUTES,
-    timeout=2 * MINUTES,
+    timeout=5 * MINUTES,
     max_containers=1,
 )
 class Converter:
@@ -48,7 +48,7 @@ class Converter:
     def _convert(self, url: str) -> dict:
         import time
 
-        from lib import fetch_html, fetch_with_js, postprocess
+        from lib import fetch_html, postprocess
 
         t0 = time.perf_counter()
 
@@ -60,11 +60,12 @@ class Converter:
         t_convert = time.perf_counter()
 
         # If readability extracted very little content, the page is likely a
-        # JS-rendered SPA (e.g. X.com). Re-fetch with a real browser.
+        # JS-rendered SPA (e.g. X.com). Re-fetch with a longer timeout to
+        # let the page fully render.
         content_len = len(markdown.strip())
         if content_len < 500:
-            print(f"[convert] only {content_len} chars extracted, retrying with Playwright")
-            raw_html = fetch_with_js(url)
+            print(f"[convert] only {content_len} chars extracted, retrying with longer timeout")
+            raw_html = fetch_html(url, timeout=60000)
             title, author, markdown = self._extract(raw_html)
             t_convert = time.perf_counter()
 

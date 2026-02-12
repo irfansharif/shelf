@@ -1,0 +1,26 @@
+convert https://irfansharif.io/blog/rubbing-control-theory-on-scheduler-latencies/
+----
+
+lines 2-4
+----
+title: Rubbing Control Theory On Scheduler Latencies
+author:
+source: https://irfansharif.io/blog/rubbing-control-theory-on-scheduler-latencies/
+
+lines 9-20
+----
+----
+# Rubbing Control Theory On Scheduler Latencies
+
+Laboratory at İstanbul Devlet Mühendislik ve Mimarlık Akademisi (1969-1982).
+
+Laboratory at İstanbul Devlet Mühendislik ve Mimarlık Akademisi (1969-1982).
+
+*This was published on our company [engineering blog](https://www.cockroachlabs.com/blog/rubbing-control-theory/). To keep up with new writing, sign up for my
+(entirely inactive) [newsletter](https://irfansharif.io/newsletter).*
+
+---
+
+For [multi-tenant](https://www.cockroachlabs.com/blog/how-we-built-cockroachdb-serverless/) mixed-workload systems like CockroachDB, performance predictability and isolation
+----
+----

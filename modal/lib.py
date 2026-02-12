@@ -18,6 +18,8 @@ _CF_CHALLENGE_MARKERS = [
     "verify you are human",
     "just a moment",
     "attention required",
+    "verification successful",
+    "enable javascript and cookies to continue",
 ]
 
 
@@ -43,21 +45,19 @@ def fetch_html(url, timeout=30000):
         browser = p.chromium.launch(
             args=[
                 "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
             ],
         )
         context = browser.new_context(
             user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             viewport={"width": 1920, "height": 1080},
+            locale="en-US",
         )
         page = context.new_page()
 
         # Stealth: remove automation signals before any page scripts run.
         page.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            // Hide Chrome DevTools protocol indicators.
-            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
-            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
-            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
         """)
 
         page.goto(url, timeout=timeout, wait_until="domcontentloaded")
@@ -68,15 +68,28 @@ def fetch_html(url, timeout=30000):
         except Exception:
             pass  # some sites never reach networkidle
 
-        # Poll until Cloudflare challenge resolves or we time out.
-        for _ in range(5):
-            page.wait_for_timeout(2000)
-            html = page.content()
-            if not _is_cf_challenge(html):
-                break
-            print("[js-fallback] Cloudflare challenge detected, waiting...")
-        else:
-            print("[js-fallback] Cloudflare challenge did not resolve")
+        # If a Cloudflare challenge is detected, wait for it to resolve.
+        html = page.content()
+        if _is_cf_challenge(html):
+            print("[cf-wait] challenge detected, waiting for resolution...")
+            initial_url = page.url
+            for i in range(20):
+                page.wait_for_timeout(3000)
+                # Check if the page navigated away (challenge solved).
+                if page.url != initial_url:
+                    print(f"[cf-wait] redirected to {page.url}")
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception:
+                        pass
+                    break
+                html = page.content()
+                if not _is_cf_challenge(html):
+                    print(f"[cf-wait] challenge resolved after {(i+1)*3}s")
+                    break
+                print(f"[cf-wait] still waiting ({i+1}/20)...")
+            else:
+                print("[cf-wait] challenge did not resolve after 60s")
 
         html = page.content()
         browser.close()
