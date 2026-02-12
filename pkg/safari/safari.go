@@ -107,8 +107,17 @@ func icloudTabs() ([]Tab, error) {
 	}
 
 	query := "SELECT title, url FROM cloud_tabs;"
-	out, err := exec.Command("sqlite3", "-json", dbPath, query).Output()
+	cmd := exec.Command("sqlite3", "-json", dbPath, query)
+	out, err := cmd.Output()
 	if err != nil {
+		// Extract stderr for a useful error message.
+		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
+			stderr := strings.TrimSpace(string(exitErr.Stderr))
+			if strings.Contains(stderr, "authorization denied") {
+				return nil, fmt.Errorf("Full Disk Access required to read iCloud tabs")
+			}
+			return nil, fmt.Errorf("sqlite3: %s", stderr)
+		}
 		return nil, fmt.Errorf("sqlite3: %w", err)
 	}
 
@@ -149,7 +158,14 @@ func readingListTabs() ([]Tab, error) {
 
 	out, err := exec.Command("plutil", "-convert", "json", "-o", "-", plistPath).Output()
 	if err != nil {
-		return nil, fmt.Errorf("plutil: %w; Full Disk Access may be required", err)
+		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
+			stderr := strings.TrimSpace(string(exitErr.Stderr))
+			if strings.Contains(stderr, "not readable") || strings.Contains(stderr, "Operation not permitted") {
+				return nil, fmt.Errorf("Full Disk Access required to read Reading List")
+			}
+			return nil, fmt.Errorf("plutil: %s", stderr)
+		}
+		return nil, fmt.Errorf("plutil: %w", err)
 	}
 
 	// Walk the JSON to find the ReadingList folder.
