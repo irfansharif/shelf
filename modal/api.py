@@ -30,15 +30,26 @@ image = (
     max_containers=1,
 )
 class Converter:
-    def _convert(self, url: str) -> dict:
-        import time
-
+    def _extract(self, raw_html: str):
+        """Run readability + markdownify on raw HTML."""
         from markdownify import markdownify
         from readability import Document
 
-        from lib import (
-            clean_html, extract_metadata, fetch_html, fix_headings, postprocess,
-        )
+        from lib import extract_metadata
+
+        title, author = extract_metadata(raw_html)
+        doc = Document(raw_html)
+        article_html = doc.summary()
+        markdown = markdownify(article_html, heading_style="ATX")
+        heading = title or doc.short_title()
+        if heading:
+            markdown = f"# {heading}\n\n{markdown}"
+        return title, author, markdown
+
+    def _convert(self, url: str) -> dict:
+        import time
+
+        from lib import fetch_html, fetch_with_js, postprocess
 
         t0 = time.perf_counter()
 
@@ -46,20 +57,18 @@ class Converter:
         raw_html = fetch_html(url)
         t_html = time.perf_counter()
 
-        title, author = extract_metadata(raw_html)
-
-        # Extract article and convert to markdown.
-        doc = Document(raw_html)
-        article_html = doc.summary()
-        markdown = markdownify(article_html, heading_style="ATX")
-        heading = title or doc.short_title()
-        if heading:
-            markdown = f"# {heading}\n\n{markdown}"
+        title, author, markdown = self._extract(raw_html)
         t_convert = time.perf_counter()
 
-        # Post-process: inject real headings from source HTML, normalize.
-        cleaned_html = clean_html(raw_html)
-        markdown = fix_headings(cleaned_html, markdown)
+        # If readability extracted very little content, the page is likely a
+        # JS-rendered SPA (e.g. X.com). Re-fetch with a real browser.
+        content_len = len(markdown.strip())
+        if content_len < 500:
+            print(f"[convert] only {content_len} chars extracted, retrying with Playwright")
+            raw_html = fetch_with_js(url)
+            title, author, markdown = self._extract(raw_html)
+            t_convert = time.perf_counter()
+
         result = postprocess(markdown)
         t_done = time.perf_counter()
 

@@ -6,33 +6,33 @@ import re
 import textwrap
 from datetime import datetime, timezone
 from html import unescape
-from html.parser import HTMLParser
 from urllib.parse import urlparse
 
 # ---------------------------------------------------------------------------
 # JS rendering fallback (Playwright)
 # ---------------------------------------------------------------------------
 
-_JS_REQUIRED_MARKERS = [
-    "javascript is not available",
-    "you need to enable javascript",
-    "please enable javascript",
-    "this app requires javascript",
-    "requires javascript to run",
-    "enable javascript to run this app",
-    "javascript is required",
-    "javascript must be enabled",
+_CF_CHALLENGE_MARKERS = [
+    "performing security verification",
+    "checking if the site connection is secure",
+    "verify you are human",
+    "just a moment",
+    "attention required",
 ]
 
 
-def needs_js_rendering(html):
-    """Check if HTML suggests the page needs JavaScript to render content."""
+def _is_cf_challenge(html):
+    """Check if HTML is a Cloudflare challenge page rather than real content."""
     lower = html.lower()
-    return any(marker in lower for marker in _JS_REQUIRED_MARKERS)
+    return any(marker in lower for marker in _CF_CHALLENGE_MARKERS)
 
 
 def fetch_with_js(url, timeout=30000):
-    """Re-fetch a URL using a headless browser for JS-rendered pages."""
+    """Re-fetch a URL using a headless browser for JS-rendered pages.
+
+    Uses stealth settings to avoid bot detection (e.g. X.com checks
+    navigator.webdriver). Waits for Cloudflare challenges to resolve.
+    """
     import time
 
     from playwright.sync_api import sync_playwright
@@ -40,10 +40,44 @@ def fetch_with_js(url, timeout=30000):
     print(f"[js-fallback] fetching with Playwright: {url}")
     t0 = time.perf_counter()
     with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page()
-        page.goto(url, timeout=timeout)
-        page.wait_for_timeout(3000)
+        browser = p.chromium.launch(
+            args=[
+                "--disable-blink-features=AutomationControlled",
+            ],
+        )
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+        )
+        page = context.new_page()
+
+        # Stealth: remove automation signals before any page scripts run.
+        page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            // Hide Chrome DevTools protocol indicators.
+            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+        """)
+
+        page.goto(url, timeout=timeout, wait_until="domcontentloaded")
+
+        # Wait for network to settle and SPA to render content.
+        try:
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass  # some sites never reach networkidle
+
+        # Poll until Cloudflare challenge resolves or we time out.
+        for _ in range(5):
+            page.wait_for_timeout(2000)
+            html = page.content()
+            if not _is_cf_challenge(html):
+                break
+            print("[js-fallback] Cloudflare challenge detected, waiting...")
+        else:
+            print("[js-fallback] Cloudflare challenge did not resolve")
+
         html = page.content()
         browser.close()
     elapsed = time.perf_counter() - t0
@@ -55,28 +89,22 @@ def fetch_with_js(url, timeout=30000):
 # HTML fetching and metadata extraction
 # ---------------------------------------------------------------------------
 
-BROWSER_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-}
-
-
 def fetch_html(url):
-    """Fetch HTML with browser-like TLS fingerprinting, falling back to JS rendering."""
+    """Fetch HTML with browser-like TLS fingerprinting, falling back to JS rendering.
+
+    Uses curl_cffi as the fast path (~1s). Falls back to headless Playwright
+    for sites that return 403 (Cloudflare JS challenges that curl_cffi can't
+    solve) or that need JS rendering to produce content.
+    """
     from curl_cffi import requests as cffi_requests
 
-    resp = cffi_requests.get(
-        url,
-        headers=BROWSER_HEADERS,
-        timeout=60,
-        impersonate="chrome",
-    )
-    resp.raise_for_status()
-    raw_html = resp.text
-    if needs_js_rendering(raw_html):
-        raw_html = fetch_with_js(url)
-    return raw_html
+    try:
+        resp = cffi_requests.get(url, timeout=60, impersonate="chrome")
+        resp.raise_for_status()
+        return resp.text
+    except Exception as e:
+        print(f"[fetch] curl_cffi failed ({e}), falling back to Playwright")
+        return fetch_with_js(url)
 
 
 def extract_metadata(raw_html):
@@ -107,202 +135,17 @@ def extract_metadata(raw_html):
         if h1_text:
             title = h1_text
             break
+    # Discard garbage titles from SPA shells / error pages.
+    _garbage_titles = {"javascript is not available", "just a moment", "attention required"}
+    if title.lower().rstrip(".") in _garbage_titles:
+        title = ""
+
     author_m = re.search(
         r'(?i)<meta[^>]+name=["\']author["\'][^>]+content=["\']([^"\']+)["\']',
         raw_html,
     )
     author = unescape(author_m.group(1).strip()) if author_m else ""
     return title, author
-
-
-# ---------------------------------------------------------------------------
-# HTML cleaning and conversion helpers
-# ---------------------------------------------------------------------------
-
-
-def clean_html(html: str, *, strip_data_uris: bool = False) -> str:
-    """Remove scripts, styles, and other non-content elements.
-
-    When strip_data_uris is True, also strip base64-encoded images and
-    collapse SVG elements to placeholders (useful for model-based
-    conversion where data URIs waste tokens).
-    """
-    html = re.sub(r"<[ ]*script.*?/[ ]*script[ ]*>", "", html,
-                  flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
-    html = re.sub(r"<[ ]*style.*?/[ ]*style[ ]*>", "", html,
-                  flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
-    html = re.sub(r"<[ ]*meta.*?>", "", html,
-                  flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
-    html = re.sub(r"<[ ]*!--.*?--[ ]*>", "", html,
-                  flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
-    html = re.sub(r"<[ ]*link.*?>", "", html,
-                  flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
-    if strip_data_uris:
-        html = re.sub(r'<img[^>]+src="data:image/[^;]+;base64,[^"]+"[^>]*>',
-                      '<img src="#"/>', html)
-        html = re.sub(r"(<svg[^>]*>)(.*?)(</svg>)",
-                      r"\1\3", html, flags=re.DOTALL)
-    return html
-
-
-def fix_headings(html: str, markdown: str) -> str:
-    """Strip hallucinated headings and re-inject real ones from source HTML.
-
-    Readability strips heading tags, so the model never sees them. This
-    function:
-    1. Extracts real headings (with level and following-paragraph context)
-       from the original HTML.
-    2. Removes all model-generated markdown headings (since they're invented).
-    3. Re-injects the real headings at the right positions by matching the
-       following-paragraph context in the markdown.
-    """
-
-    # -- Step 1: Extract headings with context from original HTML. -----------
-    class _HeadingContextExtractor(HTMLParser):
-        """Extracts (level, heading_text, following_text_snippet, preceded_by_hr) tuples."""
-        HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
-
-        def __init__(self):
-            super().__init__()
-            self.headings = []  # [(level, text, following_snippet, preceded_by_hr)]
-            self._in_heading = None
-            self._heading_text = ""
-            self._capture_after = False
-            self._after_text = ""
-            self._saw_hr = False
-
-        def _flush_after(self):
-            if self._capture_after and self.headings:
-                lvl, txt, _, hr = self.headings[-1]
-                snippet = " ".join(self._after_text.split())[:120]
-                self.headings[-1] = (lvl, txt, snippet, hr)
-            self._capture_after = False
-            self._after_text = ""
-
-        def handle_starttag(self, tag, attrs):
-            if tag == "hr":
-                self._saw_hr = True
-            elif tag in self.HEADING_TAGS:
-                self._flush_after()
-                self._in_heading = tag
-                self._heading_text = ""
-            elif self._in_heading is None and self._capture_after:
-                pass  # keep capturing
-
-        def handle_endtag(self, tag):
-            if tag == self._in_heading:
-                text = self._heading_text.strip()
-                if text:
-                    level = int(tag[1])
-                    self.headings.append((level, text, "", self._saw_hr))
-                    self._capture_after = True
-                    self._after_text = ""
-                self._in_heading = None
-                self._saw_hr = False
-
-        def handle_data(self, data):
-            if self._in_heading:
-                self._heading_text += data
-            elif self._capture_after:
-                self._after_text += data
-                if len(self._after_text) >= 120:
-                    self._flush_after()
-
-        def close(self):
-            super().close()
-            self._flush_after()
-
-    headings = []
-    try:
-        p = _HeadingContextExtractor()
-        p.feed(html)
-        p.close()
-        headings = p.headings
-    except Exception as e:
-        print(f"[heading-filter] failed to parse HTML: {e}")
-
-    # Filter out nav/boilerplate headings (very short or generic).
-    skip = {"ready for more?", "share", "subscribe", ""}
-    # Identify nav-like h1 headings whose content is entirely a link
-    # (e.g. <h1><a href="/">Site Name</a></h1> in mastheads).
-    nav_h1_texts = set()
-    for h1_m in re.finditer(r"(?is)<h1[^>]*>(.*?)</h1>", html):
-        inner = h1_m.group(1).strip()
-        if re.match(r"(?is)^\s*<a\s[^>]*>.*?</a>\s*$", inner):
-            nav_h1_texts.add(re.sub(r"<[^>]+>", "", inner).strip().lower())
-    headings = [(lvl, txt, ctx, hr) for lvl, txt, ctx, hr in headings
-                if txt.lower().strip() not in skip
-                and txt.lower().strip() not in nav_h1_texts
-                and (lvl == 1 or len(ctx) > 20)]
-
-    print(f"[heading-filter] found {len(headings)} content heading(s) in source HTML:")
-    for lvl, txt, ctx, hr in headings:
-        ctx_preview = ctx[:60] + "..." if len(ctx) > 60 else ctx
-        print(f"  h{lvl}: {txt!r}  (hr={hr}, ctx: {ctx_preview!r})")
-
-    # -- Step 2: Strip all model-generated headings. -------------------------
-    lines = markdown.split("\n")
-    stripped = []
-    removed = []
-    for line in lines:
-        if re.match(r"^#{1,6}\s+", line):
-            removed.append(line)
-        else:
-            stripped.append(line)
-
-    if removed:
-        print(f"[heading-filter] stripped {len(removed)} model-generated heading(s):")
-        for h in removed:
-            print(f"  - {h}")
-
-    if not headings:
-        print("[heading-filter] no source headings to inject")
-        return "\n".join(stripped)
-
-    # -- Step 3: Re-inject real headings at matched positions. ---------------
-    text = "\n".join(stripped)
-    injected = 0
-
-    # h1 is the article title — prepend it directly at the top (context
-    # matching won't work because the text following h1 in the full-page HTML
-    # is typically nav/byline content that readability strips out).
-    h1_headings = [(lvl, txt, ctx, hr) for lvl, txt, ctx, hr in headings if lvl == 1]
-    if h1_headings:
-        _, h1_text, _, _ = h1_headings[0]
-        text = f"# {h1_text}\n\n{text.lstrip()}"
-        injected += 1
-
-    for lvl, heading_text, context_snippet, preceded_by_hr in reversed(headings):
-        if lvl == 1:
-            continue  # already handled above
-        # Normalize the context for fuzzy searching in the markdown.
-        ctx_words = context_snippet.split()[:12]
-        if len(ctx_words) < 3:
-            continue
-        # Build a regex pattern from the first several words (allowing minor
-        # whitespace/punctuation differences).
-        pattern_parts = [re.escape(w) for w in ctx_words]
-        pattern = r"\s+".join(pattern_parts)
-        m = re.search(pattern, text, re.IGNORECASE)
-        if m:
-            prefix = "#" * lvl
-            hr_line = "---\n\n" if preceded_by_hr else ""
-            heading_line = f"\n{hr_line}{prefix} {heading_text}\n"
-            # Insert heading before the matched context.
-            pos = m.start()
-            # Back up to the start of the line.
-            line_start = text.rfind("\n", 0, pos)
-            if line_start == -1:
-                line_start = 0
-            text = text[:line_start] + "\n" + heading_line + text[line_start:]
-            injected += 1
-        else:
-            print(f"[heading-filter] could not locate context for h{lvl}: {heading_text!r}")
-
-    print(f"[heading-filter] injected {injected}/{len(headings)} heading(s)")
-    # Collapse runs of blank lines left by stripped headings.
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text
 
 
 _LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
