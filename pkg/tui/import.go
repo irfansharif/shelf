@@ -43,8 +43,8 @@ func gatherSafariTabs() tea.Cmd {
 
 // formatImportFile generates the temp file content for the editor buffer.
 // All URLs are commented out by default; the user uncomments the ones they
-// want to import. Tabs are grouped by domain with indentation so that
-// foldmethod=indent lets neovim collapse/expand each domain group.
+// want to import. Tabs are grouped by domain with explicit fold markers
+// so neovim can collapse/expand each domain group.
 func formatImportFile(tabs []safari.Tab, savedURLs map[string]bool, warnings []error) string {
 	var sb strings.Builder
 	sb.WriteString("# Safari Import — uncomment URLs to import, then :wq\n")
@@ -74,7 +74,9 @@ func formatImportFile(tabs []safari.Tab, savedURLs map[string]bool, warnings []e
 
 	for _, domain := range domains {
 		tabs := domainTabs[domain]
-		sb.WriteString(fmt.Sprintf("\n# --- %s (%d) ---\n", domain, len(tabs)))
+		// Open fold marker on the domain header line.
+		// Use Sprintf to avoid a literal fold marker in Go source.
+		sb.WriteString(fmt.Sprintf("\n# --- %s (%d) --- %s\n", domain, len(tabs), "{"+"{"+"{"))
 		for i, t := range tabs {
 			if i > 0 {
 				sb.WriteString("\n")
@@ -91,11 +93,13 @@ func formatImportFile(tabs []safari.Tab, savedURLs map[string]bool, warnings []e
 				sb.WriteString(fmt.Sprintf("\t# %s\n", t.URL))
 			}
 		}
+		// Close fold marker.
+		sb.WriteString("# " + "}" + "}" + "}\n")
 	}
 
 	// Vim modeline: conf filetype for # comment highlighting,
-	// indent folding so domain groups collapse, start fully folded.
-	sb.WriteString("\n# vim: ft=conf foldmethod=indent foldlevel=0\n")
+	// marker folding for explicit fold regions, start fully folded.
+	sb.WriteString("\n# vim: ft=conf foldmethod=marker foldlevel=0\n")
 
 	return sb.String()
 }
