@@ -1,38 +1,22 @@
 package extractor_test
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/cockroachdb/datadriven"
+	"github.com/irfansharif/shelf/pkg/extractor"
 )
 
-var defaultEndpoints = map[string]string{
-	"model": "https://irfansharif--shelf-model-converter-convert.modal.run",
-	"api":   "https://irfansharif--shelf-api-converter-convert.modal.run",
-}
+const defaultEndpoint = "https://irfansharif--shelf-api-converter-convert.modal.run"
 
-func endpointURL(app string) string {
-	switch app {
-	case "model":
-		if v := os.Getenv("SHELF_MODEL_ENDPOINT"); v != "" {
-			return v
-		}
-	case "api":
-		if v := os.Getenv("SHELF_API_ENDPOINT"); v != "" {
-			return v
-		}
+func endpointURL() string {
+	if v := os.Getenv("SHELF_API_ENDPOINT"); v != "" {
+		return v
 	}
-	return defaultEndpoints[app]
+	return defaultEndpoint
 }
 
 func TestConvert(t *testing.T) {
@@ -47,26 +31,11 @@ func TestConvert(t *testing.T) {
 	})
 }
 
-func TestProcess(t *testing.T) {
-	datadriven.Walk(t, "testdata/process", func(t *testing.T, path string) {
-		var state string
-		datadriven.RunTest(t, path, func(t *testing.T, d *datadriven.TestData) string {
-			return runCmd(t, d, &state)
-		})
-	})
-}
-
 func runCmd(t *testing.T, d *datadriven.TestData, state *string) string {
 	t.Helper()
 	switch d.Cmd {
 	case "convert":
 		return cmdConvert(t, d, state)
-	case "persist":
-		return cmdPersist(t, d, state)
-	case "load":
-		return cmdLoad(t, d, state)
-	case "process":
-		return cmdProcess(t, d, state)
 	case "lines":
 		return cmdLines(t, d, state)
 	default:
@@ -82,82 +51,13 @@ func cmdConvert(t *testing.T, d *datadriven.TestData, state *string) string {
 	}
 	url := d.CmdArgs[0].Key
 
-	app := "model"
-	if d.HasArg("app") {
-		d.ScanArgs(t, "app", &app)
-	}
-
-	endpoint := endpointURL(app)
-	if endpoint == "" {
-		d.Fatalf(t, "unknown app %q", app)
-	}
-
-	reqBody, err := json.Marshal(map[string]string{"url": url})
+	ext := extractor.New(endpointURL())
+	result, err := ext.Extract(url)
 	if err != nil {
-		d.Fatalf(t, "encoding request: %v", err)
-	}
-
-	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Post(endpoint, "application/json", bytes.NewReader(reqBody))
-	if err != nil {
-		d.Fatalf(t, "POST %s: %v", endpoint, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		d.Fatalf(t, "HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	var result struct {
-		Title   string `json:"title"`
-		Content string `json:"content"`
-		Images  []struct {
-			Path string `json:"path"`
-			Data string `json:"data"`
-		} `json:"images"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		d.Fatalf(t, "decoding response: %v", err)
+		d.Fatalf(t, "extracting %s: %v", url, err)
 	}
 
 	*state = result.Content
-	return ""
-}
-
-func cmdPersist(t *testing.T, d *datadriven.TestData, state *string) string {
-	t.Helper()
-	if len(d.CmdArgs) == 0 {
-		d.Fatalf(t, "persist requires a filename stem")
-	}
-	stem := d.CmdArgs[0].Key
-	path := filepath.Join("testdata", "fixtures", stem+".md")
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		d.Fatalf(t, "creating fixtures directory: %v", err)
-	}
-	if err := os.WriteFile(path, []byte(*state), 0644); err != nil {
-		d.Fatalf(t, "writing %s: %v", path, err)
-	}
-	return fmt.Sprintf("wrote %d bytes\n", len(*state))
-}
-
-func cmdLoad(t *testing.T, d *datadriven.TestData, state *string) string {
-	t.Helper()
-	if len(d.CmdArgs) == 0 {
-		d.Fatalf(t, "load requires a filename stem")
-	}
-	stem := d.CmdArgs[0].Key
-	path := filepath.Join("testdata", "fixtures", stem+".md")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		d.Fatalf(t, "reading %s: %v", path, err)
-	}
-	*state = string(data)
-	return ""
-}
-
-func cmdProcess(t *testing.T, d *datadriven.TestData, state *string) string {
-	t.Helper()
 	return ""
 }
 

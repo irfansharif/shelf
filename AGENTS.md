@@ -3,9 +3,8 @@
 ## Project Overview
 
 Terminal UI app for saving and reading web articles offline. URLs are fetched
-and converted to Markdown via a Modal-hosted endpoint ("model", for a GPU
-backed model, or "api" that just uses something off the shelf), then stored
-locally with downloaded images.
+and converted to Markdown via a Modal-hosted endpoint, then stored locally
+with downloaded images.
 
 ## Repository Layout
 
@@ -16,7 +15,7 @@ pkg/storage/       Saves/loads articles as Markdown files with YAML front matter
 pkg/images/        Downloads remote images, rewrites Markdown links to local paths
 pkg/config/        Reads ~/.shelf/shelf.toml (endpoint URL, data directory)
 pkg/tui/           Bubble Tea TUI: list view, URL input, search, keybindings, styles
-modal/             Python: Modal serverless apps (model.py = vLLM on H100, api.py = external API on CPU)
+modal/             Python: Modal serverless app (api.py = readability + markdownify on CPU)
 data/articles/     Stored articles (gitignored)
 ```
 
@@ -40,7 +39,6 @@ Tests live alongside their packages (e.g. `pkg/extractor/extractor_test.go`).
 ## Modal Deployment
 ```bash
 cd modal
-modal deploy model.py
 modal deploy api.py
 ```
 ## Key Conventions
