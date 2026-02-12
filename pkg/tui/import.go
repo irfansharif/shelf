@@ -78,13 +78,24 @@ func formatImportFile(tabsBySource map[string][]safari.Tab, savedURLs map[string
 			continue
 		}
 
+		// Filter out already-saved URLs.
+		var unsaved []safari.Tab
+		for _, t := range tabs {
+			if !savedURLs[t.URL] {
+				unsaved = append(unsaved, t)
+			}
+		}
+		if len(unsaved) == 0 {
+			continue
+		}
+
 		label := sourceLabel[source]
 		// Level-1 fold: source group.
-		sb.WriteString(fmt.Sprintf("\n# === %s (%d) === %s\n", label, len(tabs), "{"+"{"+"{1"))
+		sb.WriteString(fmt.Sprintf("\n# === %s (%d) === %s\n", label, len(unsaved), "{"+"{"+"{1"))
 
 		// Group tabs by domain.
 		domainTabs := make(map[string][]safari.Tab)
-		for _, t := range tabs {
+		for _, t := range unsaved {
 			domain := extractDomain(t.URL)
 			domainTabs[domain] = append(domainTabs[domain], t)
 		}
@@ -132,11 +143,7 @@ func formatImportFile(tabsBySource map[string][]safari.Tab, savedURLs map[string
 				if title == "" {
 					title = t.URL
 				}
-				if savedURLs[t.URL] {
-					sb.WriteString(fmt.Sprintf("\t# %s [already saved]\n", title))
-				} else {
-					sb.WriteString(fmt.Sprintf("\t# %s\n", title))
-				}
+				sb.WriteString(fmt.Sprintf("\t# %s\n", title))
 				sb.WriteString(fmt.Sprintf("\t# %s\n", t.URL))
 			}
 			// Close level-2 fold.
