@@ -26,7 +26,8 @@ image = (
     image=image,
     scaledown_window=5 * MINUTES,
     timeout=5 * MINUTES,
-    max_containers=1,
+    max_containers=10,
+    max_inputs=1,
 )
 class Converter:
     def _extract(self, raw_html: str):
