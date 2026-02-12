@@ -42,13 +42,13 @@ func gatherSafariTabs() tea.Cmd {
 }
 
 // formatImportFile generates the temp file content for the editor buffer.
-// URLs already in the store are commented out with an [already saved] marker.
-// Tabs are grouped by domain, sorted alphabetically.
+// All URLs are commented out by default; the user uncomments the ones they
+// want to import. Tabs are grouped by domain with indentation so that
+// foldmethod=indent lets neovim collapse/expand each domain group.
 func formatImportFile(tabs []safari.Tab, savedURLs map[string]bool, warnings []error) string {
 	var sb strings.Builder
-	sb.WriteString("# Safari Import — edit this file, then save and quit.\n")
-	sb.WriteString("# Remove lines you don't want. Add new URLs on separate lines.\n")
-	sb.WriteString("# Lines starting with # are ignored.\n")
+	sb.WriteString("# Safari Import — uncomment URLs to import, then :wq\n")
+	sb.WriteString("# Use zo/zc to unfold/fold domain groups.\n")
 	sb.WriteString("#\n")
 
 	for _, w := range warnings {
@@ -79,27 +79,23 @@ func formatImportFile(tabs []safari.Tab, savedURLs map[string]bool, warnings []e
 			if i > 0 {
 				sb.WriteString("\n")
 			}
-			if t.Title != "" {
-				if savedURLs[t.URL] {
-					sb.WriteString(fmt.Sprintf("# %s [already saved]\n", t.Title))
-					sb.WriteString(fmt.Sprintf("# %s\n", t.URL))
-				} else {
-					sb.WriteString(fmt.Sprintf("# %s\n", t.Title))
-					sb.WriteString(fmt.Sprintf("%s\n", t.URL))
-				}
+			title := t.Title
+			if title == "" {
+				title = t.URL
+			}
+			if savedURLs[t.URL] {
+				sb.WriteString(fmt.Sprintf("\t# %s [already saved]\n", title))
+				sb.WriteString(fmt.Sprintf("\t# %s\n", t.URL))
 			} else {
-				if savedURLs[t.URL] {
-					sb.WriteString("# [already saved]\n")
-					sb.WriteString(fmt.Sprintf("# %s\n", t.URL))
-				} else {
-					sb.WriteString(fmt.Sprintf("%s\n", t.URL))
-				}
+				sb.WriteString(fmt.Sprintf("\t# %s\n", title))
+				sb.WriteString(fmt.Sprintf("\t# %s\n", t.URL))
 			}
 		}
 	}
 
-	// Vim modeline for syntax highlighting (conf highlights # comments).
-	sb.WriteString("\n# vim: ft=conf\n")
+	// Vim modeline: conf filetype for # comment highlighting,
+	// indent folding so domain groups collapse, start fully folded.
+	sb.WriteString("\n# vim: ft=conf foldmethod=indent foldlevel=0\n")
 
 	return sb.String()
 }
