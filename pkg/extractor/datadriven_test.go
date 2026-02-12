@@ -10,14 +10,7 @@ import (
 	"github.com/irfansharif/shelf/pkg/extractor"
 )
 
-const defaultEndpoint = "https://irfansharif--shelf-api-converter-convert.modal.run"
-
-func endpointURL() string {
-	if v := os.Getenv("SHELF_API_ENDPOINT"); v != "" {
-		return v
-	}
-	return defaultEndpoint
-}
+const endpoint = "https://irfansharif--shelf-api-converter-convert.modal.run"
 
 func TestConvert(t *testing.T) {
 	if os.Getenv("INTEGRATION") == "" {
@@ -51,7 +44,7 @@ func cmdConvert(t *testing.T, d *datadriven.TestData, state *string) string {
 	}
 	url := d.CmdArgs[0].Key
 
-	ext := extractor.New(endpointURL())
+	ext := extractor.New(endpoint)
 	result, err := ext.Extract(url)
 	if err != nil {
 		d.Fatalf(t, "extracting %s: %v", url, err)
