@@ -152,6 +152,10 @@ func icloudTabs() ([]Tab, error) {
 
 // readingListTabs reads Safari's Reading List from Bookmarks.plist.
 // Requires Full Disk Access; degrades gracefully if not available.
+//
+// We use python3's plistlib rather than plutil because Bookmarks.plist
+// contains NSDate values that plutil -convert json cannot represent,
+// causing "invalid object in plist for destination format" errors.
 func readingListTabs() ([]Tab, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -163,59 +167,46 @@ func readingListTabs() ([]Tab, error) {
 		return nil, fmt.Errorf("Bookmarks.plist not found (Full Disk Access required)")
 	}
 
-	out, err := exec.Command("plutil", "-convert", "json", "-o", "-", plistPath).Output()
+	script := `
+import plistlib, json, sys
+with open(sys.argv[1], 'rb') as f:
+    data = plistlib.load(f)
+items = []
+for child in data.get('Children', []):
+    if child.get('Title') == 'com.apple.ReadingList':
+        for item in child.get('Children', []):
+            url = item.get('URLString', '')
+            title = ''
+            uri_dict = item.get('URIDictionary', {})
+            if uri_dict:
+                title = uri_dict.get('title', '')
+            if url:
+                items.append({'url': url, 'title': title})
+print(json.dumps(items))
+`
+	out, err := exec.Command("python3", "-c", script, plistPath).Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
 			stderr := strings.TrimSpace(string(exitErr.Stderr))
-			if strings.Contains(stderr, "not readable") || strings.Contains(stderr, "Operation not permitted") {
+			if strings.Contains(stderr, "PermissionError") || strings.Contains(stderr, "Operation not permitted") {
 				return nil, fmt.Errorf("Full Disk Access required to read Reading List")
 			}
-			return nil, fmt.Errorf("plutil: %s", stderr)
+			return nil, fmt.Errorf("python3: %s", stderr)
 		}
-		return nil, fmt.Errorf("plutil: %w", err)
+		return nil, fmt.Errorf("python3: %w", err)
 	}
 
-	// Walk the JSON to find the ReadingList folder.
-	var root map[string]interface{}
-	if err := json.Unmarshal(out, &root); err != nil {
-		return nil, fmt.Errorf("parsing plist JSON: %w", err)
+	var items []struct {
+		URL   string `json:"url"`
+		Title string `json:"title"`
 	}
-
-	children, _ := root["Children"].([]interface{})
-	var readingListChildren []interface{}
-	for _, child := range children {
-		item, ok := child.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		title, _ := item["Title"].(string)
-		if title == "com.apple.ReadingList" {
-			readingListChildren, _ = item["Children"].([]interface{})
-			break
-		}
-	}
-
-	if readingListChildren == nil {
-		return nil, nil
+	if err := json.Unmarshal(out, &items); err != nil {
+		return nil, fmt.Errorf("parsing reading list output: %w", err)
 	}
 
 	var tabs []Tab
-	for _, child := range readingListChildren {
-		item, ok := child.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		urlString, _ := item["URLString"].(string)
-		if urlString == "" {
-			continue
-		}
-
-		title := ""
-		if uriDict, ok := item["URIDictionary"].(map[string]interface{}); ok {
-			title, _ = uriDict["title"].(string)
-		}
-
-		tabs = append(tabs, Tab{URL: urlString, Title: title, Source: "readinglist"})
+	for _, item := range items {
+		tabs = append(tabs, Tab{URL: item.URL, Title: item.Title, Source: "readinglist"})
 	}
 	return tabs, nil
 }
