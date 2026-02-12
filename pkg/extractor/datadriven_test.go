@@ -2,6 +2,7 @@ package extractor_test
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,8 +14,8 @@ import (
 const endpoint = "https://irfansharif--shelf-api-converter-convert.modal.run"
 
 func TestConvert(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("skipping modal tests (set INTEGRATION=1 to run)")
+	if os.Getenv("MODAL") == "" {
+		t.Skip("skipping modal tests (set MODAL=1 to run)")
 	}
 	datadriven.Walk(t, "testdata/convert", func(t *testing.T, path string) {
 		var state string
@@ -29,6 +30,8 @@ func runCmd(t *testing.T, d *datadriven.TestData, state *string) string {
 	switch d.Cmd {
 	case "convert":
 		return cmdConvert(t, d, state)
+	case "process":
+		return cmdProcess(t, d, state)
 	case "lines":
 		return cmdLines(t, d, state)
 	default:
@@ -48,6 +51,29 @@ func cmdConvert(t *testing.T, d *datadriven.TestData, state *string) string {
 	result, err := ext.Extract(url)
 	if err != nil {
 		d.Fatalf(t, "extracting %s: %v", url, err)
+	}
+
+	*state = result.Content
+	return ""
+}
+
+func cmdProcess(t *testing.T, d *datadriven.TestData, state *string) string {
+	t.Helper()
+	if len(d.CmdArgs) == 0 {
+		d.Fatalf(t, "process requires a <slug>.html argument")
+	}
+	slug := d.CmdArgs[0].Key
+
+	fixturePath := filepath.Join("fixtures", slug)
+	html, err := os.ReadFile(fixturePath)
+	if err != nil {
+		d.Fatalf(t, "reading fixture %s: %v", fixturePath, err)
+	}
+
+	ext := extractor.New(endpoint)
+	result, err := ext.ExtractFromHTML(slug, string(html))
+	if err != nil {
+		d.Fatalf(t, "processing %s: %v", slug, err)
 	}
 
 	*state = result.Content
