@@ -13,6 +13,7 @@ type KeyMap struct {
 	// Actions
 	Open        key.Binding
 	Add         key.Binding
+	Import      key.Binding
 	Delete      key.Binding
 	Archive     key.Binding
 	ShowArchive key.Binding
@@ -52,6 +53,10 @@ func DefaultKeyMap() KeyMap {
 		Add: key.NewBinding(
 			key.WithKeys("a"),
 			key.WithHelp("a", "add URL"),
+		),
+		Import: key.NewBinding(
+			key.WithKeys("i"),
+			key.WithHelp("i", "import safari"),
 		),
 		Delete: key.NewBinding(
 			key.WithKeys("d"),
@@ -94,14 +99,14 @@ func DefaultKeyMap() KeyMap {
 
 // ShortHelp returns keybindings to show in the short help view.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Add, k.Open, k.Delete, k.Archive, k.ShowArchive, k.Reload, k.Quit}
+	return []key.Binding{k.Add, k.Import, k.Open, k.Delete, k.Archive, k.ShowArchive, k.Reload, k.Quit}
 }
 
 // FullHelp returns keybindings to show in the full help view.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Top, k.Bottom},
-		{k.Open, k.Add, k.Delete, k.Archive, k.ShowArchive, k.Search, k.Reload},
+		{k.Open, k.Add, k.Import, k.Delete, k.Archive, k.ShowArchive, k.Search, k.Reload},
 		{k.Quit, k.Cancel, k.Help},
 	}
 }
