@@ -9,7 +9,7 @@ from html import unescape
 from urllib.parse import urlparse
 
 # ---------------------------------------------------------------------------
-# JS rendering fallback (Playwright)
+# HTML fetching and metadata extraction
 # ---------------------------------------------------------------------------
 
 _CF_CHALLENGE_MARKERS = [
@@ -27,8 +27,8 @@ def _is_cf_challenge(html):
     return any(marker in lower for marker in _CF_CHALLENGE_MARKERS)
 
 
-def fetch_with_js(url, timeout=30000):
-    """Re-fetch a URL using a headless browser for JS-rendered pages.
+def fetch_html(url, timeout=30000):
+    """Fetch HTML using a headless Playwright browser.
 
     Uses stealth settings to avoid bot detection (e.g. X.com checks
     navigator.webdriver). Waits for Cloudflare challenges to resolve.
@@ -37,7 +37,7 @@ def fetch_with_js(url, timeout=30000):
 
     from playwright.sync_api import sync_playwright
 
-    print(f"[js-fallback] fetching with Playwright: {url}")
+    print(f"[fetch] fetching with Playwright: {url}")
     t0 = time.perf_counter()
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -81,30 +81,8 @@ def fetch_with_js(url, timeout=30000):
         html = page.content()
         browser.close()
     elapsed = time.perf_counter() - t0
-    print(f"[js-fallback] done in {elapsed:.1f}s ({len(html)} chars)")
+    print(f"[fetch] done in {elapsed:.1f}s ({len(html)} chars)")
     return html
-
-
-# ---------------------------------------------------------------------------
-# HTML fetching and metadata extraction
-# ---------------------------------------------------------------------------
-
-def fetch_html(url):
-    """Fetch HTML with browser-like TLS fingerprinting, falling back to JS rendering.
-
-    Uses curl_cffi as the fast path (~1s). Falls back to headless Playwright
-    for sites that return 403 (Cloudflare JS challenges that curl_cffi can't
-    solve) or that need JS rendering to produce content.
-    """
-    from curl_cffi import requests as cffi_requests
-
-    try:
-        resp = cffi_requests.get(url, timeout=60, impersonate="chrome")
-        resp.raise_for_status()
-        return resp.text
-    except Exception as e:
-        print(f"[fetch] curl_cffi failed ({e}), falling back to Playwright")
-        return fetch_with_js(url)
 
 
 def extract_metadata(raw_html):
@@ -415,7 +393,7 @@ def download_images(markdown):
     Returns (rewritten_markdown, [{"path": "images/filename", "data": base64_str}]).
     Failed downloads keep the original remote URL.
     """
-    from curl_cffi import requests as cffi_requests
+    from urllib.request import Request, urlopen
 
     matches = list(_MARKDOWN_IMAGE_RE.finditer(markdown))
     if not matches:
@@ -444,17 +422,14 @@ def download_images(markdown):
     downloaded = {}  # url -> base64 data
     for url in remote_urls:
         try:
-            resp = cffi_requests.get(
-                url,
-                headers=IMAGE_HEADERS,
-                timeout=30,
-                impersonate="chrome",
-            )
-            if resp.status_code == 200 and resp.content:
-                downloaded[url] = base64.b64encode(resp.content).decode("ascii")
-                print(f"[images] downloaded {seen[url]} ({len(resp.content)} bytes)")
+            req = Request(url, headers=IMAGE_HEADERS)
+            with urlopen(req, timeout=30) as resp:
+                data = resp.read()
+            if data:
+                downloaded[url] = base64.b64encode(data).decode("ascii")
+                print(f"[images] downloaded {seen[url]} ({len(data)} bytes)")
             else:
-                print(f"[images] failed {url}: HTTP {resp.status_code}")
+                print(f"[images] failed {url}: empty response")
         except Exception as e:
             print(f"[images] failed {url}: {e}")
 

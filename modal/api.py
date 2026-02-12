@@ -1,8 +1,8 @@
 """
 API-based URL-to-Markdown conversion (CPU only).
 
-Fetches HTML via curl_cffi (browser TLS fingerprinting) and converts
-to markdown using readability + markdownify.
+Fetches HTML via Playwright (headless Chromium) and converts to
+markdown using readability + markdownify.
 """
 
 import modal
@@ -14,7 +14,6 @@ app = modal.App("shelf-api")
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install(
-        "curl_cffi",
         "readability-lxml", "lxml[html_clean]", "markdownify",
         "playwright",
     )
