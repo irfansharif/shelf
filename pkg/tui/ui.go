@@ -24,6 +24,8 @@ const (
 	stateLoading
 	stateSearch
 	stateConfirmOverwrite
+	stateGatheringTabs
+	stateImporting
 )
 
 // Model is the main TUI model.
@@ -51,6 +53,13 @@ type Model struct {
 	pendingResult  *extractor.ExtractResult // post-fetch slug collision
 	overwritePath  string                   // pre-fetch URL match: file path to delete
 	overwriteTitle string                   // pre-fetch URL match: title for display
+
+	// Import state
+	importQueue   []string
+	importTotal   int
+	importDone    int
+	importSkipped int
+	importErrors  []string
 
 	// Status
 	err        error
@@ -110,7 +119,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKeyMsg(msg)
 
 	case spinner.TickMsg:
-		if m.state == stateLoading {
+		if m.state == stateLoading || m.state == stateGatheringTabs || m.state == stateImporting {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
@@ -173,6 +182,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshArticles()
 		return m, nil
 
+	case safariTabsGatheredMsg:
+		return m.handleSafariTabsGathered(msg)
+
+	case importEditorFinishedMsg:
+		return m.handleImportEditorFinished(msg)
+
+	case importArticleResultMsg:
+		return m.handleImportArticleResult(msg)
+
 	case clearStatusMsg:
 		m.statusMsg = ""
 		m.err = nil
@@ -203,10 +221,20 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleAddURLKeys(msg)
 	case stateSearch:
 		return m.handleSearchKeys(msg)
-	case stateLoading:
+	case stateLoading, stateGatheringTabs:
 		// Only allow quit during loading
 		if key.Matches(msg, m.keys.Quit) || key.Matches(msg, m.keys.Cancel) {
 			m.state = stateList
+			return m, nil
+		}
+		return m, nil
+	case stateImporting:
+		// Cancel stops remaining imports but keeps already-saved articles.
+		if key.Matches(msg, m.keys.Cancel) || key.Matches(msg, m.keys.Quit) {
+			m.importQueue = nil
+			m.state = stateList
+			m.refreshArticles()
+			m.statusMsg = m.importSummary() + " (cancelled)"
 			return m, nil
 		}
 		return m, nil
@@ -253,6 +281,11 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.urlInput = m.urlInput.Reset()
 		m.err = nil
 		return m, m.urlInput.Focus()
+
+	case key.Matches(msg, m.keys.Import):
+		m.state = stateGatheringTabs
+		m.err = nil
+		return m, tea.Batch(m.spinner.Tick, gatherSafariTabs())
 
 	case key.Matches(msg, m.keys.Delete):
 		return m.deleteSelectedArticle()
@@ -571,7 +604,7 @@ func (m Model) View() string {
 	if m.showArchived {
 		sb.WriteString(m.styles.Muted.Render(" (+archived)"))
 	}
-	if m.state != stateAddURL && m.state != stateLoading && m.state != stateConfirmOverwrite {
+	if m.state != stateAddURL && m.state != stateLoading && m.state != stateConfirmOverwrite && m.state != stateGatheringTabs && m.state != stateImporting {
 		if m.searchInput.Value() != "" {
 			sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" (%d of %d of %d)", m.cursor+1, filtered, m.store.Count())))
 		} else {
@@ -581,9 +614,12 @@ func (m Model) View() string {
 	sb.WriteString("\n\n")
 
 	// Search bar (replaced by URL input when adding/loading)
-	if m.state == stateAddURL || m.state == stateLoading || m.state == stateConfirmOverwrite {
+	switch m.state {
+	case stateAddURL, stateLoading, stateConfirmOverwrite:
 		sb.WriteString(m.urlInput.View())
-	} else {
+	case stateGatheringTabs, stateImporting:
+		// No input bar during import workflow.
+	default:
 		sb.WriteString(m.searchInput.View())
 	}
 	sb.WriteString("\n\n")
@@ -600,6 +636,26 @@ func (m Model) View() string {
 			sb.WriteString(fmt.Sprintf("Article %q already exists. Overwrite? [y/n]", m.pendingResult.Title))
 		} else {
 			sb.WriteString(fmt.Sprintf("Already saved as %q. Re-fetch? [y/n]", m.overwriteTitle))
+		}
+	case stateGatheringTabs:
+		sb.WriteString(m.spinner.View())
+		sb.WriteString(" Gathering Safari tabs...")
+	case stateImporting:
+		sb.WriteString(m.spinner.View())
+		saved := m.importDone - m.importSkipped - len(m.importErrors)
+		sb.WriteString(fmt.Sprintf(" Importing %d/%d...", m.importDone+1, m.importTotal))
+		if saved > 0 || m.importSkipped > 0 {
+			details := []string{}
+			if saved > 0 {
+				details = append(details, fmt.Sprintf("%d saved", saved))
+			}
+			if m.importSkipped > 0 {
+				details = append(details, fmt.Sprintf("%d skipped", m.importSkipped))
+			}
+			if len(m.importErrors) > 0 {
+				details = append(details, fmt.Sprintf("%d failed", len(m.importErrors)))
+			}
+			sb.WriteString(" " + strings.Join(details, ", "))
 		}
 	default:
 		sb.WriteString(m.renderList())
@@ -702,6 +758,10 @@ func (m Model) renderHelp() string {
 		parts = append(parts, "[enter] done", "[ctrl+c] clear", "[esc] clear")
 	case stateConfirmOverwrite:
 		parts = append(parts, "[y] overwrite", "[n] cancel")
+	case stateGatheringTabs:
+		parts = append(parts, "[esc] cancel")
+	case stateImporting:
+		parts = append(parts, "[esc] cancel")
 	default:
 		archiveLabel := "[x] archive"
 		if len(m.articles) > 0 && m.cursor < len(m.articles) && m.articles[m.cursor].IsArchived() {
@@ -713,6 +773,7 @@ func (m Model) renderHelp() string {
 		}
 		parts = append(parts,
 			"[a]dd URL",
+			"[i]mport safari",
 			"[enter] open in neovim",
 			"[d]elete",
 			archiveLabel,

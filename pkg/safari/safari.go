@@ -1,0 +1,219 @@
+package safari
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+// Tab represents a single browser tab from Safari.
+type Tab struct {
+	URL    string
+	Title  string
+	Source string // "local", "icloud", "readinglist"
+}
+
+// GatherTabs collects tabs from all available Safari sources (local tabs,
+// iCloud tabs, Reading List). Each source is best-effort: failures are
+// returned as warnings rather than fatal errors.
+func GatherTabs() ([]Tab, []error) {
+	var allTabs []Tab
+	var warnings []error
+
+	local, err := localTabs()
+	if err != nil {
+		warnings = append(warnings, fmt.Errorf("local tabs: %w", err))
+	}
+	allTabs = append(allTabs, local...)
+
+	icloud, err := icloudTabs()
+	if err != nil {
+		warnings = append(warnings, fmt.Errorf("iCloud tabs: %w", err))
+	}
+	allTabs = append(allTabs, icloud...)
+
+	reading, err := readingListTabs()
+	if err != nil {
+		warnings = append(warnings, fmt.Errorf("Reading List: %w", err))
+	}
+	allTabs = append(allTabs, reading...)
+
+	return deduplicate(allTabs), warnings
+}
+
+// localTabs uses JXA (JavaScript for Automation) via osascript to get open
+// Safari tabs. This works without any special permissions.
+func localTabs() ([]Tab, error) {
+	script := `
+var safari = Application("Safari");
+var tabs = [];
+for (var w = 0; w < safari.windows.length; w++) {
+    var win = safari.windows[w];
+    for (var t = 0; t < win.tabs.length; t++) {
+        var tab = win.tabs[t];
+        tabs.push({url: tab.url(), title: tab.name()});
+    }
+}
+JSON.stringify(tabs);
+`
+	out, err := exec.Command("osascript", "-l", "JavaScript", "-e", script).Output()
+	if err != nil {
+		return nil, fmt.Errorf("osascript: %w", err)
+	}
+
+	var raw []struct {
+		URL   string `json:"url"`
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("parsing JXA output: %w", err)
+	}
+
+	var tabs []Tab
+	for _, r := range raw {
+		if r.URL == "" {
+			continue
+		}
+		tabs = append(tabs, Tab{URL: r.URL, Title: r.Title, Source: "local"})
+	}
+	return tabs, nil
+}
+
+// icloudTabs attempts to read iCloud tabs from CloudTabs.db using sqlite3.
+// Requires Full Disk Access for the containerized path; degrades gracefully.
+func icloudTabs() ([]Tab, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+
+	paths := []string{
+		filepath.Join(home, "Library", "Safari", "CloudTabs.db"),
+		filepath.Join(home, "Library", "Containers", "com.apple.Safari", "Data", "Library", "Safari", "CloudTabs.db"),
+	}
+
+	var dbPath string
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			dbPath = p
+			break
+		}
+	}
+	if dbPath == "" {
+		return nil, fmt.Errorf("CloudTabs.db not found (iCloud tabs unavailable)")
+	}
+
+	query := "SELECT title, url FROM cloud_tabs;"
+	out, err := exec.Command("sqlite3", "-json", dbPath, query).Output()
+	if err != nil {
+		return nil, fmt.Errorf("sqlite3: %w", err)
+	}
+
+	if len(strings.TrimSpace(string(out))) == 0 {
+		return nil, nil
+	}
+
+	var rows []struct {
+		Title string `json:"title"`
+		URL   string `json:"url"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return nil, fmt.Errorf("parsing sqlite3 output: %w", err)
+	}
+
+	var tabs []Tab
+	for _, r := range rows {
+		if r.URL == "" {
+			continue
+		}
+		tabs = append(tabs, Tab{URL: r.URL, Title: r.Title, Source: "icloud"})
+	}
+	return tabs, nil
+}
+
+// readingListTabs reads Safari's Reading List from Bookmarks.plist.
+// Requires Full Disk Access; degrades gracefully if not available.
+func readingListTabs() ([]Tab, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+
+	plistPath := filepath.Join(home, "Library", "Safari", "Bookmarks.plist")
+	if _, err := os.Stat(plistPath); err != nil {
+		return nil, fmt.Errorf("Bookmarks.plist not found (Full Disk Access required)")
+	}
+
+	out, err := exec.Command("plutil", "-convert", "json", "-o", "-", plistPath).Output()
+	if err != nil {
+		return nil, fmt.Errorf("plutil: %w; Full Disk Access may be required", err)
+	}
+
+	// Walk the JSON to find the ReadingList folder.
+	var root map[string]interface{}
+	if err := json.Unmarshal(out, &root); err != nil {
+		return nil, fmt.Errorf("parsing plist JSON: %w", err)
+	}
+
+	children, _ := root["Children"].([]interface{})
+	var readingListChildren []interface{}
+	for _, child := range children {
+		item, ok := child.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		title, _ := item["Title"].(string)
+		if title == "com.apple.ReadingList" {
+			readingListChildren, _ = item["Children"].([]interface{})
+			break
+		}
+	}
+
+	if readingListChildren == nil {
+		return nil, nil
+	}
+
+	var tabs []Tab
+	for _, child := range readingListChildren {
+		item, ok := child.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		urlString, _ := item["URLString"].(string)
+		if urlString == "" {
+			continue
+		}
+
+		title := ""
+		if uriDict, ok := item["URIDictionary"].(map[string]interface{}); ok {
+			title, _ = uriDict["title"].(string)
+		}
+
+		tabs = append(tabs, Tab{URL: urlString, Title: title, Source: "readinglist"})
+	}
+	return tabs, nil
+}
+
+// deduplicate removes duplicate URLs, preferring local > icloud > readinglist.
+func deduplicate(tabs []Tab) []Tab {
+	seen := make(map[string]int) // URL -> index in result
+	sourcePriority := map[string]int{"local": 0, "icloud": 1, "readinglist": 2}
+	var result []Tab
+
+	for _, t := range tabs {
+		if idx, exists := seen[t.URL]; exists {
+			// Keep the higher-priority source (lower number).
+			existing := result[idx]
+			if sourcePriority[t.Source] < sourcePriority[existing.Source] {
+				result[idx] = t
+			}
+		} else {
+			seen[t.URL] = len(result)
+			result = append(result, t)
+		}
+	}
+	return result
+}
