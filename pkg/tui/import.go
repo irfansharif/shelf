@@ -3,8 +3,10 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -41,6 +43,7 @@ func gatherSafariTabs() tea.Cmd {
 
 // formatImportFile generates the temp file content for the editor buffer.
 // URLs already in the store are commented out with an [already saved] marker.
+// Tabs are grouped by domain, sorted alphabetically.
 func formatImportFile(tabs []safari.Tab, savedURLs map[string]bool, warnings []error) string {
 	var sb strings.Builder
 	sb.WriteString("# Safari Import — edit this file, then save and quit.\n")
@@ -55,29 +58,27 @@ func formatImportFile(tabs []safari.Tab, savedURLs map[string]bool, warnings []e
 		sb.WriteString("#\n")
 	}
 
-	// Group tabs by source.
-	groups := []struct {
-		source string
-		label  string
-	}{
-		{"local", "Local Tabs"},
-		{"icloud", "iCloud Tabs"},
-		{"readinglist", "Reading List"},
+	// Group tabs by domain.
+	domainTabs := make(map[string][]safari.Tab)
+	for _, t := range tabs {
+		domain := extractDomain(t.URL)
+		domainTabs[domain] = append(domainTabs[domain], t)
 	}
 
-	for _, g := range groups {
-		var groupTabs []safari.Tab
-		for _, t := range tabs {
-			if t.Source == g.source {
-				groupTabs = append(groupTabs, t)
-			}
-		}
-		if len(groupTabs) == 0 {
-			continue
-		}
+	// Sort domains alphabetically.
+	var domains []string
+	for d := range domainTabs {
+		domains = append(domains, d)
+	}
+	sort.Strings(domains)
 
-		sb.WriteString(fmt.Sprintf("\n# --- %s (%d) ---\n", g.label, len(groupTabs)))
-		for _, t := range groupTabs {
+	for _, domain := range domains {
+		tabs := domainTabs[domain]
+		sb.WriteString(fmt.Sprintf("\n# --- %s (%d) ---\n", domain, len(tabs)))
+		for i, t := range tabs {
+			if i > 0 {
+				sb.WriteString("\n")
+			}
 			if t.Title != "" {
 				if savedURLs[t.URL] {
 					sb.WriteString(fmt.Sprintf("# %s [already saved]\n", t.Title))
@@ -97,7 +98,21 @@ func formatImportFile(tabs []safari.Tab, savedURLs map[string]bool, warnings []e
 		}
 	}
 
+	// Vim modeline for syntax highlighting (conf highlights # comments).
+	sb.WriteString("\n# vim: ft=conf\n")
+
 	return sb.String()
+}
+
+// extractDomain returns the hostname from a URL, stripping "www." prefix.
+func extractDomain(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" {
+		return "other"
+	}
+	host := parsed.Hostname()
+	host = strings.TrimPrefix(host, "www.")
+	return host
 }
 
 // parseImportFile reads the edited temp file and returns URLs to import.
