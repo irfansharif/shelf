@@ -1,3 +1,4 @@
 /shelf
-.claude
+.claude/*
+!.claude/skills/
 data
