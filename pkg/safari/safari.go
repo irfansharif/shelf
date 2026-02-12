@@ -61,6 +61,13 @@ JSON.stringify(tabs);
 `
 	out, err := exec.Command("osascript", "-l", "JavaScript", "-e", script).Output()
 	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
+			stderr := strings.TrimSpace(string(exitErr.Stderr))
+			if strings.Contains(stderr, "-1743") {
+				return nil, fmt.Errorf("Automation permission required — allow your terminal to control Safari in System Settings > Privacy & Security > Automation")
+			}
+			return nil, fmt.Errorf("osascript: %s", stderr)
+		}
 		return nil, fmt.Errorf("osascript: %w", err)
 	}
 
