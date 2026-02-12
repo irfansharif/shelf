@@ -1,7 +1,7 @@
 """
 API-based URL-to-Markdown conversion (CPU only).
 
-Fetches HTML via Playwright (headless Chromium) and converts to
+Fetches HTML via curl_cffi (browser TLS impersonation) and converts to
 markdown using readability + markdownify.
 """
 
@@ -15,9 +15,8 @@ image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install(
         "readability-lxml", "lxml[html_clean]", "markdownify",
-        "playwright",
+        "curl_cffi",
     )
-    .run_commands("playwright install chromium --with-deps")
     .add_local_file("lib.py", "/root/lib.py")
 )
 
@@ -60,16 +59,6 @@ class Converter:
         title, author, markdown = self._extract(raw_html)
         t_convert = time.perf_counter()
 
-        # If readability extracted very little content, the page is likely a
-        # JS-rendered SPA (e.g. X.com). Re-fetch with a longer timeout to
-        # let the page fully render.
-        content_len = len(markdown.strip())
-        if content_len < 500:
-            print(f"[convert] only {content_len} chars extracted, retrying with longer timeout")
-            raw_html = fetch_html(url, timeout=60000)
-            title, author, markdown = self._extract(raw_html)
-            t_convert = time.perf_counter()
-
         result = postprocess(markdown)
         t_done = time.perf_counter()
 
@@ -90,6 +79,28 @@ class Converter:
             url = data["url"]
             result = self._convert(url)
             return build_result(result, url)
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            return JSONResponse(
+                status_code=500,
+                content={"error": str(e), "type": type(e).__name__},
+            )
+
+    @modal.fastapi_endpoint(method="POST")
+    def process(self, data: dict):
+        """Process pre-fetched HTML (skip HTTP fetch)."""
+        from fastapi.responses import JSONResponse
+
+        from lib import build_result, postprocess
+
+        try:
+            url = data["url"]
+            html = data["html"]
+            title, author, markdown = self._extract(html)
+            result = postprocess(markdown)
+            return build_result({"title": title, "author": author, "markdown": result}, url)
         except Exception as e:
             import traceback
 

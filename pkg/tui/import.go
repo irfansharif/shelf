@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -18,7 +19,7 @@ import (
 // Messages for the import workflow.
 type (
 	safariTabsGatheredMsg struct {
-		tabs     []safari.Tab
+		tabs     map[string][]safari.Tab
 		warnings []error
 	}
 	importEditorFinishedMsg struct {
@@ -41,14 +42,27 @@ func gatherSafariTabs() tea.Cmd {
 	}
 }
 
+// sourceLabel maps source keys to display names for the import file headers.
+var sourceLabel = map[string]string{
+	"icloud":      "iCloud Tabs",
+	"local":       "Local Tabs",
+	"readinglist": "Reading List",
+}
+
+// sourceOrder defines the iteration order for sources in the import file.
+var sourceOrder = []string{"local", "icloud", "readinglist"}
+
 // formatImportFile generates the temp file content for the editor buffer.
 // All URLs are commented out by default; the user uncomments the ones they
-// want to import. Tabs are grouped by domain with explicit fold markers
-// so neovim can collapse/expand each domain group.
-func formatImportFile(tabs []safari.Tab, savedURLs map[string]bool, warnings []error) string {
+// want to import. Tabs are grouped first by source (iCloud, Local, Reading
+// List) with level-1 fold markers, then by domain with level-2 fold markers.
+// Within each domain, tabs are sorted by LastViewed descending; domain groups
+// are sorted by their most recent tab's LastViewed (descending), with an
+// alphabetical tiebreaker.
+func formatImportFile(tabsBySource map[string][]safari.Tab, savedURLs map[string]bool, warnings []error) string {
 	var sb strings.Builder
 	sb.WriteString("# Safari Import — uncomment URLs to import, then :wq\n")
-	sb.WriteString("# Use zo/zc to unfold/fold domain groups.\n")
+	sb.WriteString("# Use zo/zc to unfold/fold groups, zR to open all.\n")
 	sb.WriteString("#\n")
 
 	for _, w := range warnings {
@@ -58,43 +72,79 @@ func formatImportFile(tabs []safari.Tab, savedURLs map[string]bool, warnings []e
 		sb.WriteString("#\n")
 	}
 
-	// Group tabs by domain.
-	domainTabs := make(map[string][]safari.Tab)
-	for _, t := range tabs {
-		domain := extractDomain(t.URL)
-		domainTabs[domain] = append(domainTabs[domain], t)
-	}
-
-	// Sort domains alphabetically.
-	var domains []string
-	for d := range domainTabs {
-		domains = append(domains, d)
-	}
-	sort.Strings(domains)
-
-	for _, domain := range domains {
-		tabs := domainTabs[domain]
-		// Open fold marker on the domain header line.
-		// Use Sprintf to avoid a literal fold marker in Go source.
-		sb.WriteString(fmt.Sprintf("\n# --- %s (%d) --- %s\n", domain, len(tabs), "{"+"{"+"{"))
-		for i, t := range tabs {
-			if i > 0 {
-				sb.WriteString("\n")
-			}
-			title := t.Title
-			if title == "" {
-				title = t.URL
-			}
-			if savedURLs[t.URL] {
-				sb.WriteString(fmt.Sprintf("\t# %s [already saved]\n", title))
-				sb.WriteString(fmt.Sprintf("\t# %s\n", t.URL))
-			} else {
-				sb.WriteString(fmt.Sprintf("\t# %s\n", title))
-				sb.WriteString(fmt.Sprintf("\t# %s\n", t.URL))
-			}
+	for _, source := range sourceOrder {
+		tabs := tabsBySource[source]
+		if len(tabs) == 0 {
+			continue
 		}
-		// Close fold marker.
-		sb.WriteString("# " + "}" + "}" + "}\n")
+
+		label := sourceLabel[source]
+		// Level-1 fold: source group.
+		sb.WriteString(fmt.Sprintf("\n# === %s (%d) === %s\n", label, len(tabs), "{"+"{"+"{1"))
+
+		// Group tabs by domain.
+		domainTabs := make(map[string][]safari.Tab)
+		for _, t := range tabs {
+			domain := extractDomain(t.URL)
+			domainTabs[domain] = append(domainTabs[domain], t)
+		}
+
+		// Sort tabs within each domain by LastViewed descending.
+		for d := range domainTabs {
+			sort.Slice(domainTabs[d], func(i, j int) bool {
+				return domainTabs[d][i].LastViewed.After(domainTabs[d][j].LastViewed)
+			})
+		}
+
+		// Sort domains by most recent tab's LastViewed (descending),
+		// alphabetical tiebreaker.
+		var domains []string
+		for d := range domainTabs {
+			domains = append(domains, d)
+		}
+		domainMaxTime := make(map[string]time.Time)
+		for d, dt := range domainTabs {
+			var maxT time.Time
+			for _, t := range dt {
+				if t.LastViewed.After(maxT) {
+					maxT = t.LastViewed
+				}
+			}
+			domainMaxTime[d] = maxT
+		}
+		sort.Slice(domains, func(i, j int) bool {
+			ti, tj := domainMaxTime[domains[i]], domainMaxTime[domains[j]]
+			if !ti.Equal(tj) {
+				return ti.After(tj)
+			}
+			return domains[i] < domains[j]
+		})
+
+		for _, domain := range domains {
+			dt := domainTabs[domain]
+			// Level-2 fold: domain group.
+			sb.WriteString(fmt.Sprintf("\n# --- %s (%d) --- %s\n", domain, len(dt), "{"+"{"+"{2"))
+			for i, t := range dt {
+				if i > 0 {
+					sb.WriteString("\n")
+				}
+				title := t.Title
+				if title == "" {
+					title = t.URL
+				}
+				if savedURLs[t.URL] {
+					sb.WriteString(fmt.Sprintf("\t# %s [already saved]\n", title))
+				} else {
+					sb.WriteString(fmt.Sprintf("\t# %s\n", title))
+				}
+				sb.WriteString(fmt.Sprintf("\t# %s\n", t.URL))
+			}
+			// Close level-2 fold.
+			sb.WriteString("# " + "}" + "}" + "}2\n")
+		}
+
+		// Close level-1 fold.
+		sb.WriteString("# " + "}" + "}" + "}1\n")
 	}
 
 	// Vim modeline: conf filetype for # comment highlighting,
@@ -136,12 +186,17 @@ func parseImportFile(path string) ([]string, error) {
 // handleSafariTabsGathered processes gathered Safari tabs: writes the temp
 // file and opens it in the user's editor.
 func (m Model) handleSafariTabsGathered(msg safariTabsGatheredMsg) (tea.Model, tea.Cmd) {
-	if len(msg.tabs) == 0 && len(msg.warnings) > 0 {
+	totalTabs := 0
+	for _, tabs := range msg.tabs {
+		totalTabs += len(tabs)
+	}
+
+	if totalTabs == 0 && len(msg.warnings) > 0 {
 		m.state = stateList
 		m.err = fmt.Errorf("no Safari tabs found: %s", msg.warnings[0].Error())
 		return m, nil
 	}
-	if len(msg.tabs) == 0 {
+	if totalTabs == 0 {
 		m.state = stateList
 		m.statusMsg = "No Safari tabs found"
 		return m, nil

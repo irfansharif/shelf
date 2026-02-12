@@ -11,14 +11,15 @@ type KeyMap struct {
 	Bottom key.Binding
 
 	// Actions
-	Open        key.Binding
-	Add         key.Binding
-	Import      key.Binding
-	Delete      key.Binding
-	Archive     key.Binding
-	ShowArchive key.Binding
-	Search      key.Binding
-	Reload      key.Binding
+	Open         key.Binding
+	Add          key.Binding
+	Import       key.Binding
+	Delete       key.Binding
+	Archive      key.Binding
+	ShowArchive  key.Binding
+	Search       key.Binding
+	Reload       key.Binding
+	SafariReload key.Binding
 
 	// General
 	Quit   key.Binding
@@ -78,6 +79,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("r"),
 			key.WithHelp("r", "reload"),
 		),
+		SafariReload: key.NewBinding(
+			key.WithKeys("R"),
+			key.WithHelp("R", "refetch (safari)"),
+		),
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c"),
 			key.WithHelp("q", "quit"),
@@ -99,14 +104,14 @@ func DefaultKeyMap() KeyMap {
 
 // ShortHelp returns keybindings to show in the short help view.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Add, k.Import, k.Open, k.Delete, k.Archive, k.ShowArchive, k.Reload, k.Quit}
+	return []key.Binding{k.Add, k.Import, k.Open, k.Delete, k.Archive, k.ShowArchive, k.Reload, k.SafariReload, k.Quit}
 }
 
 // FullHelp returns keybindings to show in the full help view.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Top, k.Bottom},
-		{k.Open, k.Add, k.Import, k.Delete, k.Archive, k.ShowArchive, k.Search, k.Reload},
+		{k.Open, k.Add, k.Import, k.Delete, k.Archive, k.ShowArchive, k.Search, k.Reload, k.SafariReload},
 		{k.Quit, k.Cancel, k.Help},
 	}
 }

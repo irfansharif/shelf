@@ -2,4 +2,4 @@
 
 Tiny terminal reader for stashing articles.
 
-![screenshot](screenshot.png)
+![screenshot](data/assets/screenshot.png)

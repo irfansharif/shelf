@@ -78,6 +78,12 @@ func (m URLInputModel) Focus() tea.Cmd {
 	return m.textInput.Focus()
 }
 
+// Blur removes focus from the input, hiding the cursor.
+func (m URLInputModel) Blur() URLInputModel {
+	m.textInput.Blur()
+	return m
+}
+
 // SearchInputModel handles search input state.
 type SearchInputModel struct {
 	textInput textinput.Model

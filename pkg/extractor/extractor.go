@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -86,6 +87,48 @@ func (e *Extractor) Extract(sourceURL string) (*ExtractResult, error) {
 	}
 
 	// Decode base64 image data.
+	var images []ImageData
+	for _, img := range result.Images {
+		data, err := base64.StdEncoding.DecodeString(img.Data)
+		if err != nil {
+			return nil, fmt.Errorf("decoding image %s: %w", img.Path, err)
+		}
+		images = append(images, ImageData{Path: img.Path, Data: data})
+	}
+
+	return &ExtractResult{
+		Title:   result.Title,
+		Content: result.Content,
+		Images:  images,
+	}, nil
+}
+
+// ExtractFromHTML processes pre-fetched HTML via the Modal process endpoint,
+// skipping the HTTP fetch step.
+func (e *Extractor) ExtractFromHTML(sourceURL, rawHTML string) (*ExtractResult, error) {
+	// Derive process endpoint URL from convert endpoint URL.
+	processURL := strings.Replace(e.endpointURL, "-convert.", "-process.", 1)
+
+	reqBody, err := json.Marshal(map[string]string{"url": sourceURL, "html": rawHTML})
+	if err != nil {
+		return nil, fmt.Errorf("encoding request: %w", err)
+	}
+	resp, err := e.client.Post(processURL, "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("processing HTML: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("process endpoint HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result endpointResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+
 	var images []ImageData
 	for _, img := range result.Images {
 		data, err := base64.StdEncoding.DecodeString(img.Data)

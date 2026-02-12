@@ -12,87 +12,26 @@ from urllib.parse import urlparse
 # HTML fetching and metadata extraction
 # ---------------------------------------------------------------------------
 
-_CF_CHALLENGE_MARKERS = [
-    "performing security verification",
-    "checking if the site connection is secure",
-    "verify you are human",
-    "just a moment",
-    "attention required",
-    "verification successful",
-    "enable javascript and cookies to continue",
-]
-
-
-def _is_cf_challenge(html):
-    """Check if HTML is a Cloudflare challenge page rather than real content."""
-    lower = html.lower()
-    return any(marker in lower for marker in _CF_CHALLENGE_MARKERS)
-
-
-def fetch_html(url, timeout=30000):
-    """Fetch HTML using a headless Playwright browser.
-
-    Uses stealth settings to avoid bot detection (e.g. X.com checks
-    navigator.webdriver). Waits for Cloudflare challenges to resolve.
-    """
+def fetch_html(url, timeout=30):
+    """Fetch HTML using curl_cffi with browser TLS impersonation."""
     import time
 
-    from playwright.sync_api import sync_playwright
+    from curl_cffi import requests as curl_requests
 
-    print(f"[fetch] fetching with Playwright: {url}")
+    print(f"[fetch] fetching with curl_cffi: {url}")
     t0 = time.perf_counter()
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-            ],
-        )
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080},
-            locale="en-US",
-        )
-        page = context.new_page()
-
-        # Stealth: remove automation signals before any page scripts run.
-        page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        """)
-
-        page.goto(url, timeout=timeout, wait_until="domcontentloaded")
-
-        # Wait for network to settle and SPA to render content.
-        try:
-            page.wait_for_load_state("networkidle", timeout=15000)
-        except Exception:
-            pass  # some sites never reach networkidle
-
-        # If a Cloudflare challenge is detected, wait for it to resolve.
-        html = page.content()
-        if _is_cf_challenge(html):
-            print("[cf-wait] challenge detected, waiting for resolution...")
-            initial_url = page.url
-            for i in range(20):
-                page.wait_for_timeout(3000)
-                # Check if the page navigated away (challenge solved).
-                if page.url != initial_url:
-                    print(f"[cf-wait] redirected to {page.url}")
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=15000)
-                    except Exception:
-                        pass
-                    break
-                html = page.content()
-                if not _is_cf_challenge(html):
-                    print(f"[cf-wait] challenge resolved after {(i+1)*3}s")
-                    break
-                print(f"[cf-wait] still waiting ({i+1}/20)...")
-            else:
-                print("[cf-wait] challenge did not resolve after 60s")
-
-        html = page.content()
-        browser.close()
+    resp = curl_requests.get(
+        url,
+        impersonate="chrome",
+        timeout=timeout,
+        headers={
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        allow_redirects=True,
+    )
+    resp.raise_for_status()
+    html = resp.text
     elapsed = time.perf_counter() - t0
     print(f"[fetch] done in {elapsed:.1f}s ({len(html)} chars)")
     return html
@@ -359,10 +298,6 @@ def postprocess(markdown: str) -> str:
 
 _MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 
-IMAGE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-}
 
 
 def _local_filename(raw_url, used_names):
@@ -406,7 +341,7 @@ def download_images(markdown):
     Returns (rewritten_markdown, [{"path": "images/filename", "data": base64_str}]).
     Failed downloads keep the original remote URL.
     """
-    from urllib.request import Request, urlopen
+    from curl_cffi import requests as curl_requests
 
     matches = list(_MARKDOWN_IMAGE_RE.finditer(markdown))
     if not matches:
@@ -435,9 +370,8 @@ def download_images(markdown):
     downloaded = {}  # url -> base64 data
     for url in remote_urls:
         try:
-            req = Request(url, headers=IMAGE_HEADERS)
-            with urlopen(req, timeout=30) as resp:
-                data = resp.read()
+            resp = curl_requests.get(url, impersonate="chrome", timeout=30)
+            data = resp.content
             if data:
                 downloaded[url] = base64.b64encode(data).decode("ascii")
                 print(f"[images] downloaded {seen[url]} ({len(data)} bytes)")

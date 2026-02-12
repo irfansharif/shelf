@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -26,17 +27,19 @@ const (
 	stateConfirmOverwrite
 	stateGatheringTabs
 	stateImporting
+	stateSafariWaiting
 )
 
 // Model is the main TUI model.
 type Model struct {
-	state    State
-	store    *storage.Store
-	extract  *extractor.Extractor
-	keys     KeyMap
-	styles   Styles
-	width    int
-	height   int
+	state          State
+	store          *storage.Store
+	extract        *extractor.Extractor
+	keys           KeyMap
+	styles         Styles
+	width          int
+	height         int
+	safariURL string // URL being fetched via Safari (for process endpoint)
 
 	// List state
 	articles     []storage.ArticleMeta
@@ -68,12 +71,18 @@ type Model struct {
 
 // Messages
 type (
-	articlesFetchedMsg struct{ articles []storage.ArticleMeta }
+	articlesFetchedMsg  struct{ articles []storage.ArticleMeta }
 	articleExtractedMsg struct{ result *extractor.ExtractResult }
 	articleDeletedMsg   struct{ id string }
 	extractionErrMsg    struct{ err error }
-	editorFinishedMsg  struct{ err error }
-	clearStatusMsg     struct{}
+	editorFinishedMsg   struct{ err error }
+	clearStatusMsg          struct{}
+	safariOpenedMsg         struct{ err error }
+	safariHTMLExtractedMsg  struct {
+		url  string
+		html string
+		err  error
+	}
 )
 
 // New creates a new TUI model. endpointURL is the Modal endpoint used for
@@ -87,14 +96,14 @@ func New(store *storage.Store, endpointURL string) Model {
 	s.Style = styles.Spinner
 
 	m := Model{
-		state:       stateList,
-		store:       store,
-		extract:     extractor.New(endpointURL),
-		keys:        keys,
-		styles:      styles,
-		urlInput:    NewURLInput(styles),
-		searchInput: NewSearchInput(styles),
-		spinner:     s,
+		state:           stateList,
+		store:           store,
+		extract:         extractor.New(endpointURL),
+		keys:            keys,
+		styles:          styles,
+		urlInput:        NewURLInput(styles),
+		searchInput:     NewSearchInput(styles),
+		spinner: s,
 	}
 	m.refreshArticles()
 	return m
@@ -159,6 +168,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m.openSelectedArticle()
+
+	case safariOpenedMsg:
+		if msg.err != nil {
+			m.state = stateList
+			m.err = fmt.Errorf("opening Safari: %w", msg.err)
+			m.safariURL = ""
+			return m, nil
+		}
+		// Stay in stateSafariWaiting — user will press Enter when ready.
+		return m, nil
+
+	case safariHTMLExtractedMsg:
+		if msg.err != nil {
+			m.state = stateList
+			m.err = msg.err
+			return m, nil
+		}
+		m.state = stateLoading
+		return m, tea.Batch(
+			m.spinner.Tick,
+			m.extractArticleFromHTML(msg.url, msg.html),
+		)
 
 	case extractionErrMsg:
 		m.state = stateList
@@ -225,6 +256,19 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Only allow quit during loading
 		if key.Matches(msg, m.keys.Quit) || key.Matches(msg, m.keys.Cancel) {
 			m.state = stateList
+			return m, nil
+		}
+		return m, nil
+	case stateSafariWaiting:
+		switch {
+		case key.Matches(msg, m.keys.Submit): // Enter
+			m.state = stateLoading
+			return m, tea.Batch(m.spinner.Tick, m.extractSafariHTML())
+		case key.Matches(msg, m.keys.Cancel), key.Matches(msg, m.keys.Quit):
+			m.state = stateList
+			m.overwritePath = ""
+			m.overwriteTitle = ""
+			m.safariURL = ""
 			return m, nil
 		}
 		return m, nil
@@ -314,7 +358,7 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Pre-fill the URL bar and go straight to fetching.
-		m.urlInput = m.urlInput.SetValue(article.SourceURL)
+		m.urlInput = m.urlInput.SetValue(article.SourceURL).Blur()
 		m.overwritePath = article.FilePath
 		m.overwriteTitle = article.Title
 		m.state = stateLoading
@@ -322,6 +366,22 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.spinner.Tick,
 			m.extractArticle(article.SourceURL),
 		)
+
+	case key.Matches(msg, m.keys.SafariReload):
+		if len(m.articles) == 0 || m.cursor >= len(m.articles) {
+			return m, nil
+		}
+		article := m.articles[m.cursor]
+		if article.SourceURL == "" {
+			m.err = fmt.Errorf("no source URL for %q", article.Title)
+			return m, nil
+		}
+		m.overwritePath = article.FilePath
+		m.overwriteTitle = article.Title
+		m.safariURL = article.SourceURL
+		m.urlInput = m.urlInput.SetValue(article.SourceURL).Blur()
+		m.state = stateSafariWaiting
+		return m, m.openInSafari(article.SourceURL)
 	}
 
 	return m, nil
@@ -347,6 +407,7 @@ func (m Model) handleAddURLKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state = stateList
 			return m, nil
 		}
+		m.urlInput = m.urlInput.Blur()
 		// Check if an article from this URL already exists.
 		for _, a := range m.store.List() {
 			if a.SourceURL == url {
@@ -438,6 +499,52 @@ func (m Model) extractArticle(url string) tea.Cmd {
 			return extractionErrMsg{err: err}
 		}
 		return articleExtractedMsg{result: result}
+	}
+}
+
+func (m Model) extractArticleFromHTML(url, html string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := m.extract.ExtractFromHTML(url, html)
+		if err != nil {
+			return extractionErrMsg{err: err}
+		}
+		return articleExtractedMsg{result: result}
+	}
+}
+
+func (m Model) openInSafari(url string) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(750 * time.Millisecond) // Let TUI render before Safari steals focus.
+		escaped := strings.ReplaceAll(url, `\`, `\\`)
+		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+		script := fmt.Sprintf(`tell application "Safari"
+	activate
+	if (count of windows) = 0 then
+		make new document with properties {URL:"%s"}
+	else
+		tell front window
+			set current tab to (make new tab with properties {URL:"%s"})
+		end tell
+	end if
+end tell`, escaped, escaped)
+		_, err := exec.Command("osascript", "-e", script).Output()
+		return safariOpenedMsg{err: err}
+	}
+}
+
+func (m Model) extractSafariHTML() tea.Cmd {
+	url := m.safariURL
+	return func() tea.Msg {
+		script := `tell application "Safari" to return source of current tab of front window`
+		out, err := exec.Command("osascript", "-e", script).Output()
+		if err != nil {
+			return safariHTMLExtractedMsg{url: url, err: fmt.Errorf("extracting HTML from Safari: %w", err)}
+		}
+		html := string(out)
+		if strings.TrimSpace(html) == "" {
+			return safariHTMLExtractedMsg{url: url, err: fmt.Errorf("Safari returned empty HTML")}
+		}
+		return safariHTMLExtractedMsg{url: url, html: html}
 	}
 }
 
@@ -604,7 +711,7 @@ func (m Model) View() string {
 	if m.showArchived {
 		sb.WriteString(m.styles.Muted.Render(" (+archived)"))
 	}
-	if m.state != stateAddURL && m.state != stateLoading && m.state != stateConfirmOverwrite && m.state != stateGatheringTabs && m.state != stateImporting {
+	if m.state != stateAddURL && m.state != stateLoading && m.state != stateConfirmOverwrite && m.state != stateGatheringTabs && m.state != stateImporting && m.state != stateSafariWaiting {
 		if m.searchInput.Value() != "" {
 			sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" (%d of %d of %d)", m.cursor+1, filtered, m.store.Count())))
 		} else {
@@ -615,7 +722,7 @@ func (m Model) View() string {
 
 	// Search bar (replaced by URL input when adding/loading)
 	switch m.state {
-	case stateAddURL, stateLoading, stateConfirmOverwrite:
+	case stateAddURL, stateLoading, stateConfirmOverwrite, stateSafariWaiting:
 		sb.WriteString(m.urlInput.View())
 	case stateGatheringTabs, stateImporting:
 		// No input bar during import workflow.
@@ -637,6 +744,8 @@ func (m Model) View() string {
 		} else {
 			sb.WriteString(fmt.Sprintf("Already saved as %q. Re-fetch? [y/n]", m.overwriteTitle))
 		}
+	case stateSafariWaiting:
+		sb.WriteString("Safari opened — complete any verification, then press Enter...")
 	case stateGatheringTabs:
 		sb.WriteString(m.spinner.View())
 		sb.WriteString(" Gathering Safari tabs...")
@@ -756,30 +865,35 @@ func (m Model) renderHelp() string {
 		parts = append(parts, "[enter] fetch", "[ctrl+c] clear", "[esc] cancel")
 	case stateSearch:
 		parts = append(parts, "[enter] done", "[ctrl+c] clear", "[esc] clear")
+	case stateLoading:
+		parts = append(parts, "[esc] cancel")
 	case stateConfirmOverwrite:
 		parts = append(parts, "[y] overwrite", "[n] cancel")
+	case stateSafariWaiting:
+		parts = append(parts, "[enter] extract", "[esc] cancel")
 	case stateGatheringTabs:
 		parts = append(parts, "[esc] cancel")
 	case stateImporting:
 		parts = append(parts, "[esc] cancel")
 	default:
-		archiveLabel := "[x] archive"
+		archiveLabel := "[x/X] archive/show"
 		if len(m.articles) > 0 && m.cursor < len(m.articles) && m.articles[m.cursor].IsArchived() {
-			archiveLabel = "[x] unarchive"
+			archiveLabel = "[x/X] unarchive/hide"
 		}
-		showArchiveLabel := "[X] show archived"
 		if m.showArchived {
-			showArchiveLabel = "[X] hide archived"
+			archiveLabel = "[x/X] archive/hide"
+			if len(m.articles) > 0 && m.cursor < len(m.articles) && m.articles[m.cursor].IsArchived() {
+				archiveLabel = "[x/X] unarchive/hide"
+			}
 		}
 		parts = append(parts,
 			"[a]dd URL",
-			"[i]mport safari",
-			"[enter] open in neovim",
+			"[i]mport",
+			"[enter] open",
 			"[d]elete",
 			archiveLabel,
-			showArchiveLabel,
 			"[/] search",
-			"[r]efetch",
+			"[r/R]efetch",
 			"[q]uit",
 		)
 	}
