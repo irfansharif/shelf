@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3:*)",
+      "WebSearch",
+      "WebFetch(domain:modal.com)",
+      "Bash(modal deploy:*)"
+    ]
+  }
+}
