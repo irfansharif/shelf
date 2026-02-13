@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/irfansharif/shelf/pkg/extractor"
+	"github.com/irfansharif/shelf/pkg/safari"
 	"github.com/irfansharif/shelf/pkg/storage"
 )
 
@@ -39,7 +40,8 @@ type Model struct {
 	styles         Styles
 	width          int
 	height         int
-	safariURL string // URL being fetched via Safari (for process endpoint)
+	safariURL    string         // URL being fetched via Safari (for process endpoint)
+	safariWindow *safari.Window // tracked Safari window for the current fetch
 
 	// List state
 	articles     []storage.ArticleMeta
@@ -77,7 +79,10 @@ type (
 	extractionErrMsg    struct{ err error }
 	editorFinishedMsg   struct{ err error }
 	clearStatusMsg          struct{}
-	safariOpenedMsg         struct{ err error }
+	safariOpenedMsg         struct {
+		window *safari.Window
+		err    error
+	}
 	safariHTMLExtractedMsg  struct {
 		url  string
 		html string
@@ -174,8 +179,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.state = stateList
 			m.err = fmt.Errorf("opening Safari: %w", msg.err)
 			m.safariURL = ""
+			m.safariWindow = nil
 			return m, nil
 		}
+		m.safariWindow = msg.window
 		// Stay in stateSafariWaiting — user will press Enter when ready.
 		return m, nil
 
@@ -265,10 +272,14 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state = stateLoading
 			return m, tea.Batch(m.spinner.Tick, m.extractSafariHTML())
 		case key.Matches(msg, m.keys.Cancel), key.Matches(msg, m.keys.Quit):
+			if m.safariWindow != nil {
+				_ = m.safariWindow.Close()
+			}
 			m.state = stateList
 			m.overwritePath = ""
 			m.overwriteTitle = ""
 			m.safariURL = ""
+			m.safariWindow = nil
 			return m, nil
 		}
 		return m, nil
@@ -515,35 +526,23 @@ func (m Model) extractArticleFromHTML(url, html string) tea.Cmd {
 func (m Model) openInSafari(url string) tea.Cmd {
 	return func() tea.Msg {
 		time.Sleep(750 * time.Millisecond) // Let TUI render before Safari steals focus.
-		escaped := strings.ReplaceAll(url, `\`, `\\`)
-		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-		script := fmt.Sprintf(`tell application "Safari"
-	activate
-	if (count of windows) = 0 then
-		make new document with properties {URL:"%s"}
-	else
-		tell front window
-			set current tab to (make new tab with properties {URL:"%s"})
-		end tell
-	end if
-end tell`, escaped, escaped)
-		_, err := exec.Command("osascript", "-e", script).Output()
-		return safariOpenedMsg{err: err}
+		w, err := safari.OpenURL(url)
+		return safariOpenedMsg{window: w, err: err}
 	}
 }
 
 func (m Model) extractSafariHTML() tea.Cmd {
 	url := m.safariURL
+	w := m.safariWindow
 	return func() tea.Msg {
-		script := `tell application "Safari" to return source of current tab of front window`
-		out, err := exec.Command("osascript", "-e", script).Output()
+		html, err := w.TabSource()
 		if err != nil {
 			return safariHTMLExtractedMsg{url: url, err: fmt.Errorf("extracting HTML from Safari: %w", err)}
 		}
-		html := string(out)
 		if strings.TrimSpace(html) == "" {
 			return safariHTMLExtractedMsg{url: url, err: fmt.Errorf("Safari returned empty HTML")}
 		}
+		_ = w.Close()
 		return safariHTMLExtractedMsg{url: url, html: html}
 	}
 }

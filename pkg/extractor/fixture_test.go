@@ -1,15 +1,15 @@
 package extractor_test
 
 import (
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/datadriven"
+
+	"github.com/irfansharif/shelf/pkg/safari"
 )
 
 func TestBrowser(t *testing.T) {
@@ -29,26 +29,6 @@ func TestBrowser(t *testing.T) {
 	})
 }
 
-// safariCurrentTabURL returns the URL of Safari's frontmost tab.
-func safariCurrentTabURL() (string, error) {
-	script := `tell application "Safari" to return URL of current tab of front window`
-	out, err := exec.Command("osascript", "-e", script).Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-// safariCurrentTabSource returns the page source of Safari's frontmost tab.
-func safariCurrentTabSource() (string, error) {
-	script := `tell application "Safari" to return source of current tab of front window`
-	out, err := exec.Command("osascript", "-e", script).Output()
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
-}
-
 func fixtureExtract(t *testing.T, d *datadriven.TestData) string {
 	t.Helper()
 	if len(d.CmdArgs) < 2 {
@@ -57,47 +37,35 @@ func fixtureExtract(t *testing.T, d *datadriven.TestData) string {
 	url := d.CmdArgs[0].Key
 	slug := d.CmdArgs[1].Key
 
-	// Open URL in Safari.
-	escaped := strings.ReplaceAll(url, `\`, `\\`)
-	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-	openScript := fmt.Sprintf(`tell application "Safari"
-	activate
-	if (count of windows) = 0 then
-		make new document with properties {URL:"%s"}
-	else
-		tell front window
-			set current tab to (make new tab with properties {URL:"%s"})
-		end tell
-	end if
-end tell`, escaped, escaped)
-	if _, err := exec.Command("osascript", "-e", openScript).Output(); err != nil {
+	// Open URL in a dedicated Safari window.
+	w, err := safari.OpenURL(url)
+	if err != nil {
 		d.Fatalf(t, "opening Safari: %v", err)
 	}
+	defer w.Close()
 
-	// Wait for Safari's current tab to navigate to our URL. Substack URLs
-	// redirect (e.g. /home/post/p-NNN → actual article URL), so we check
-	// that the tab URL starts with the requested URL or the tab has moved
-	// away from a blank/previous page.
+	// Wait for Safari's tab to navigate to our URL. Substack URLs redirect
+	// (e.g. /home/post/p-NNN → actual article URL), so we check that the
+	// tab URL starts with the requested URL.
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(1 * time.Second)
-		tabURL, err := safariCurrentTabURL()
+		tabURL, err := w.TabURL()
 		if err != nil {
 			continue
 		}
-		// Accept if tab URL starts with our URL (exact or redirected).
 		if strings.HasPrefix(tabURL, url) {
 			break
 		}
 	}
 
-	// Now wait for the page source to stabilize (two consecutive reads match).
+	// Wait for the page source to stabilize (two consecutive reads match).
 	var html string
 	var prev string
 	deadline = time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(3 * time.Second)
-		h, err := safariCurrentTabSource()
+		h, err := w.TabSource()
 		if err != nil || strings.TrimSpace(h) == "" {
 			continue
 		}

@@ -289,6 +289,59 @@ print(json.dumps(items))
 	return tabs, nil
 }
 
+// Window represents a Safari window tracked by its AppleScript window ID.
+type Window struct {
+	ID int
+}
+
+// OpenURL opens the given URL in a new, dedicated Safari window and returns
+// a handle to it.
+func OpenURL(url string) (*Window, error) {
+	escaped := strings.ReplaceAll(url, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	script := fmt.Sprintf(`tell application "Safari"
+	activate
+	make new document with properties {URL:"%s"}
+	return id of front window
+end tell`, escaped)
+	out, err := exec.Command("osascript", "-e", script).Output()
+	if err != nil {
+		return nil, err
+	}
+	var id int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &id); err != nil {
+		return nil, fmt.Errorf("parsing Safari window id: %w", err)
+	}
+	return &Window{ID: id}, nil
+}
+
+// TabURL returns the URL of this window's current tab.
+func (w *Window) TabURL() (string, error) {
+	script := fmt.Sprintf(`tell application "Safari" to return URL of current tab of window id %d`, w.ID)
+	out, err := exec.Command("osascript", "-e", script).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// TabSource returns the page source HTML of this window's current tab.
+func (w *Window) TabSource() (string, error) {
+	script := fmt.Sprintf(`tell application "Safari" to return source of current tab of window id %d`, w.ID)
+	out, err := exec.Command("osascript", "-e", script).Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// Close closes this Safari window.
+func (w *Window) Close() error {
+	script := fmt.Sprintf(`tell application "Safari" to close window id %d`, w.ID)
+	_, err := exec.Command("osascript", "-e", script).Output()
+	return err
+}
+
 // deduplicateByURL removes duplicate URLs within a single source, keeping the
 // tab with the most recent LastViewed time on collision.
 func deduplicateByURL(tabs []Tab) []Tab {
