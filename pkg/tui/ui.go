@@ -15,6 +15,8 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/mattn/go-runewidth"
+
 	"github.com/irfansharif/shelf/pkg/extractor"
 	"github.com/irfansharif/shelf/pkg/safari"
 	"github.com/irfansharif/shelf/pkg/storage"
@@ -350,9 +352,14 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case stateConfirmDelete:
 		return m.handleConfirmDeleteKeys(msg)
 	case stateHelp:
-		// Any key exits help.
+		// Exit help and re-process the key as a list action,
+		// so e.g. pressing X both closes help and toggles archives.
 		m.state = stateList
-		return m, nil
+		if key.Matches(msg, m.keys.Help) || msg.String() == "?" {
+			// Just close help without re-triggering it.
+			return m, nil
+		}
+		// Fall through to list key handling below.
 	}
 
 	// Any keypress in the list clears a previous status/error toast.
@@ -943,7 +950,7 @@ func (m Model) View() string {
 	if m.showArchived {
 		sb.WriteString(m.styles.Muted.Render(" (+archived)"))
 	}
-	showCounts := m.state != stateAddURL && m.state != stateLoading && m.state != stateConfirmOverwrite && m.state != stateConfirmDelete && m.state != stateGatheringTabs && m.state != stateImporting && m.state != stateSafariWaiting && m.state != stateHelp
+	showCounts := m.state != stateAddURL && m.state != stateLoading && m.state != stateConfirmOverwrite && m.state != stateConfirmDelete && m.state != stateGatheringTabs && m.state != stateImporting && m.state != stateSafariWaiting
 	if showCounts {
 		if m.searchInput.Value() != "" {
 			total := len(m.applyArchiveFilter(m.store.List()))
@@ -975,8 +982,8 @@ func (m Model) View() string {
 	switch m.state {
 	case stateAddURL, stateLoading, stateConfirmOverwrite, stateSafariWaiting:
 		sb.WriteString(m.urlInput.View())
-	case stateGatheringTabs, stateImporting, stateHelp:
-		// No input bar during import or help.
+	case stateGatheringTabs, stateImporting:
+		// No input bar during import.
 	default:
 		sb.WriteString(m.searchInput.View())
 	}
@@ -1021,7 +1028,7 @@ func (m Model) View() string {
 			sb.WriteString(" " + strings.Join(details, ", "))
 		}
 	case stateHelp:
-		sb.WriteString(m.renderHelpOverlay())
+		sb.WriteString(m.renderList())
 	default:
 		sb.WriteString(m.renderList())
 	}
@@ -1050,14 +1057,28 @@ func (m Model) View() string {
 		statusLine = m.styles.Muted.Render(m.statusMsg)
 	}
 
+	// Build the help grid (shown above footer in stateHelp).
+	var helpGrid string
+	if m.state == stateHelp {
+		helpGrid = m.renderHelpOverlay()
+	}
+
 	// Footer — push to bottom by filling remaining vertical space.
 	content := sb.String()
 	contentHeight := strings.Count(content, "\n") + 1
 	appPaddingV := 2 // Top + bottom padding from App style
 	footerLines := 2 // Status/blank line + help text
-	remaining := m.height - contentHeight - appPaddingV - footerLines
+	remaining := m.height - contentHeight - appPaddingV - footerLines - m.helpGridHeight()
 	if remaining > 0 {
 		sb.WriteString(strings.Repeat("\n", remaining))
+	}
+
+	if helpGrid != "" {
+		// Draw a horizontal rule separator.
+		contentWidth := m.width - 4 // account for App padding
+		sb.WriteString(m.styles.Muted.Render(strings.Repeat("─", contentWidth)))
+		sb.WriteString("\n\n")
+		sb.WriteString(helpGrid)
 	}
 
 	if statusLine != "" {
@@ -1082,7 +1103,7 @@ func (m Model) renderList() string {
 	var sb strings.Builder
 
 	// Calculate visible items based on height
-	listHeight := m.height - 12 // Account for header, footer, etc.
+	listHeight := m.height - 12 - m.helpGridHeight() // Account for header, footer, help grid, etc.
 	itemHeight := 3            // Each item is 2 lines + 1 blank line
 	visibleItems := listHeight / itemHeight
 	if visibleItems < 1 {
@@ -1111,9 +1132,6 @@ func (m Model) renderList() string {
 	}
 
 	contentWidth := m.width - 4
-	if contentWidth > 120 {
-		contentWidth = 120
-	}
 
 	for i := start; i < end; i++ {
 		if i > start {
@@ -1209,42 +1227,105 @@ func (m Model) renderHelp() string {
 	return result
 }
 
+// helpGridHeight returns the number of terminal lines the help grid and its
+// separator consume when displayed (0 when help is not shown).
+func (m Model) helpGridHeight() int {
+	if m.state != stateHelp {
+		return 0
+	}
+	// 6 keybinding rows + 1 separator + 1 blank line after separator
+	// + 5 blank lines above separator for visual breathing room.
+	return 13
+}
+
 func (m Model) renderHelpOverlay() string {
-	var sb strings.Builder
+	type entry struct{ key, desc string }
 
-	sb.WriteString(m.styles.SelectedTitle.Render("Keybindings"))
-	sb.WriteString("\n\n")
-
-	lines := []struct{ key, desc string }{
-		{"j / ↓", "Move down"},
-		{"k / ↑", "Move up"},
-		{"g / Home", "Go to top"},
-		{"G / End", "Go to bottom"},
-		{"", ""},
-		{"Enter", "Open article in editor"},
-		{"a", "Add URL"},
-		{"d", "Delete article"},
-		{"/", "Search articles"},
-		{"", ""},
-		{"x", "Archive / unarchive"},
-		{"X", "Show / hide archived"},
-		{"r", "Re-fetch article"},
-		{"R", "Re-fetch via Safari"},
-		{"i", "Import from Safari"},
-		{"", ""},
-		{"?", "Show this help"},
-		{"q", "Quit"},
+	col1 := []entry{
+		{"j / ↓", "move down"},
+		{"k / ↑", "move up"},
+		{"g / Home", "go to top"},
+		{"G / End", "go to bottom"},
+	}
+	col2 := []entry{
+		{"Enter", "open in editor"},
+		{"a", "add URL"},
+		{"d", "delete article"},
+		{"/", "search articles"},
+		{"i", "import from Safari"},
+	}
+	col3 := []entry{
+		{"x", "archive / unarchive"},
+		{"X", "show / hide archived"},
+		{"r", "re-fetch article"},
+		{"R", "re-fetch via Safari"},
+		{"?", "show this help"},
+		{"q", "quit"},
 	}
 
-	for _, l := range lines {
-		if l.key == "" {
-			sb.WriteString("\n")
-			continue
+	// Find max rows across columns.
+	rows := len(col1)
+	if len(col2) > rows {
+		rows = len(col2)
+	}
+	if len(col3) > rows {
+		rows = len(col3)
+	}
+
+	// Calculate key display width per column (for alignment).
+	sw := runewidth.StringWidth
+	keyWidth := func(col []entry) int {
+		w := 0
+		for _, e := range col {
+			if sw(e.key) > w {
+				w = sw(e.key)
+			}
 		}
-		padded := l.key + strings.Repeat(" ", 12-len(l.key))
-		sb.WriteString("  ")
-		sb.WriteString(m.styles.SelectedTitle.Render(padded))
-		sb.WriteString(m.styles.Muted.Render(l.desc))
+		return w
+	}
+	kw1 := keyWidth(col1)
+	kw2 := keyWidth(col2)
+	kw3 := keyWidth(col3)
+
+	cols := [3][]entry{col1, col2, col3}
+	kws := [3]int{kw1, kw2, kw3}
+
+	// Compute max description display width per column for alignment.
+	descWidth := func(col []entry) int {
+		w := 0
+		for _, e := range col {
+			if sw(e.desc) > w {
+				w = sw(e.desc)
+			}
+		}
+		return w
+	}
+	dws := [3]int{descWidth(col1), descWidth(col2), descWidth(col3)}
+	colGap := 4 // gap between columns
+
+	indent := "  "
+	var sb strings.Builder
+	for r := 0; r < rows; r++ {
+		sb.WriteString(indent)
+		for c := 0; c < 3; c++ {
+			if c > 0 {
+				sb.WriteString(strings.Repeat(" ", colGap))
+			}
+			if r < len(cols[c]) {
+				e := cols[c][r]
+				padded := e.key + strings.Repeat(" ", kws[c]-sw(e.key))
+				sb.WriteString(m.styles.SelectedTitle.Render(padded))
+				sb.WriteString("  ")
+				desc := e.desc
+				if c < 2 {
+					desc += strings.Repeat(" ", dws[c]-sw(e.desc))
+				}
+				sb.WriteString(m.styles.Muted.Render(desc))
+			} else if c < 2 {
+				// Empty cell — pad to keep columns aligned.
+				sb.WriteString(strings.Repeat(" ", kws[c]+2+dws[c]))
+			}
+		}
 		sb.WriteString("\n")
 	}
 
