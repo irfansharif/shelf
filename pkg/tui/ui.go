@@ -167,6 +167,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.urlInput = m.urlInput.SetWidth(msg.Width)
 		m.searchInput = m.searchInput.SetWidth(msg.Width)
+		m.scrollPos = clampScroll(m.cursor, m.scrollPos, m.calcVisibleItems(), len(m.articles))
 		return m, nil
 
 	case tea.KeyMsg:
@@ -216,6 +217,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
+		m.scrollPos = clampScroll(m.cursor, m.scrollPos, m.calcVisibleItems(), len(m.articles))
 		return m.openSelectedArticle()
 
 	case safariOpenedMsg:
@@ -297,6 +299,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cursor >= len(m.articles) {
 			m.cursor = max(0, len(m.articles)-1)
 		}
+		m.scrollPos = clampScroll(m.cursor, m.scrollPos, m.calcVisibleItems(), len(m.articles))
 	}
 
 	return m, cmd
@@ -375,22 +378,26 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor > 0 {
 			m.cursor--
 		}
+		m.scrollPos = clampScroll(m.cursor, m.scrollPos, m.calcVisibleItems(), len(m.articles))
 		return m, nil
 
 	case key.Matches(msg, m.keys.Down):
 		if m.cursor < len(m.articles)-1 {
 			m.cursor++
 		}
+		m.scrollPos = clampScroll(m.cursor, m.scrollPos, m.calcVisibleItems(), len(m.articles))
 		return m, nil
 
 	case key.Matches(msg, m.keys.Top):
 		m.cursor = 0
+		m.scrollPos = 0
 		return m, nil
 
 	case key.Matches(msg, m.keys.Bottom):
 		if len(m.articles) > 0 {
 			m.cursor = len(m.articles) - 1
 		}
+		m.scrollPos = clampScroll(m.cursor, m.scrollPos, m.calcVisibleItems(), len(m.articles))
 		return m, nil
 
 	case key.Matches(msg, m.keys.Open):
@@ -432,6 +439,7 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.searchInput = m.searchInput.Clear()
 		m.refreshArticles()
 		m.cursor = 0
+		m.scrollPos = 0
 		var cmd tea.Cmd
 		m.searchInput, cmd = m.searchInput.Activate()
 		return m, cmd
@@ -539,6 +547,7 @@ func (m Model) handleAddURLKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 							break
 						}
 					}
+					m.scrollPos = clampScroll(m.cursor, m.scrollPos, m.calcVisibleItems(), len(m.articles))
 					return m, nil
 				}
 				m.state = stateConfirmOverwrite
@@ -568,6 +577,7 @@ func (m Model) handleSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.searchInput = m.searchInput.Clear()
 			m.refreshArticles()
 			m.cursor = 0
+			m.scrollPos = 0
 			return m, nil
 		}
 		m.state = stateList
@@ -580,6 +590,7 @@ func (m Model) handleSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.searchInput = m.searchInput.Clear()
 		m.refreshArticles()
 		m.cursor = 0
+		m.scrollPos = 0
 		return m, nil
 
 	case key.Matches(msg, m.keys.Submit):
@@ -596,6 +607,7 @@ func (m Model) handleSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.cursor >= len(m.articles) {
 		m.cursor = max(0, len(m.articles)-1)
 	}
+	m.scrollPos = clampScroll(m.cursor, m.scrollPos, m.calcVisibleItems(), len(m.articles))
 	return m, cmd
 }
 
@@ -669,6 +681,7 @@ func (m Model) handleConfirmOverwriteKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
+			m.scrollPos = clampScroll(m.cursor, m.scrollPos, m.calcVisibleItems(), len(m.articles))
 			m.pendingResult = nil
 			return m.openSelectedArticle()
 		}
@@ -879,6 +892,41 @@ func (m *Model) refreshArticles() {
 	if m.cursor >= len(m.articles) {
 		m.cursor = max(0, len(m.articles)-1)
 	}
+	m.scrollPos = clampScroll(m.cursor, m.scrollPos, m.calcVisibleItems(), len(m.articles))
+}
+
+// calcVisibleItems returns the number of list items that fit on screen.
+func (m Model) calcVisibleItems() int {
+	listHeight := m.height - 12 - m.helpGridHeight()
+	itemHeight := 3
+	visibleItems := listHeight / itemHeight
+	if visibleItems < 1 {
+		visibleItems = 5
+	}
+	return visibleItems
+}
+
+// clampScroll adjusts scrollPos so cursor stays within the visible viewport.
+// It only moves the viewport when the cursor goes out of view; otherwise the
+// viewport stays put and the cursor moves freely within it.
+func clampScroll(cursor, scrollPos, visibleItems, totalItems int) int {
+	if cursor < scrollPos {
+		scrollPos = cursor
+	}
+	if cursor >= scrollPos+visibleItems {
+		scrollPos = cursor - visibleItems + 1
+	}
+	maxScroll := totalItems - visibleItems
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if scrollPos > maxScroll {
+		scrollPos = maxScroll
+	}
+	if scrollPos < 0 {
+		scrollPos = 0
+	}
+	return scrollPos
 }
 
 func (m Model) applyArchiveFilter(articles []storage.ArticleMeta) []storage.ArticleMeta {
@@ -933,6 +981,7 @@ func (m Model) archiveSelectedArticle() (tea.Model, tea.Cmd) {
 			break
 		}
 	}
+	m.scrollPos = clampScroll(m.cursor, m.scrollPos, m.calcVisibleItems(), len(m.articles))
 	return m, nil
 }
 
@@ -1102,19 +1151,9 @@ func (m Model) renderList() string {
 
 	var sb strings.Builder
 
-	// Calculate visible items based on height
-	listHeight := m.height - 12 - m.helpGridHeight() // Account for header, footer, help grid, etc.
-	itemHeight := 3            // Each item is 2 lines + 1 blank line
-	visibleItems := listHeight / itemHeight
-	if visibleItems < 1 {
-		visibleItems = 5
-	}
-
-	// Calculate scroll position
-	start := 0
-	if m.cursor >= visibleItems {
-		start = m.cursor - visibleItems + 1
-	}
+	// Use the pre-computed scroll position maintained by Update.
+	visibleItems := m.calcVisibleItems()
+	start := m.scrollPos
 	end := start + visibleItems
 	if end > len(m.articles) {
 		end = len(m.articles)
