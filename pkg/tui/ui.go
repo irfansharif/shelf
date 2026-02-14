@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -72,7 +73,8 @@ type Model struct {
 	statusMsg  string
 
 	// Tmux split
-	tmuxPaneID string // tmux pane ID for the editor split (e.g. "%42")
+	tmuxPaneID   string // tmux pane ID for the editor split (e.g. "%42")
+	positionFile string // temp file where vim writes cursor position on exit
 }
 
 // Messages
@@ -105,14 +107,15 @@ func New(store *storage.Store, endpointURL string) Model {
 	s.Style = styles.Spinner
 
 	m := Model{
-		state:           stateList,
-		store:           store,
-		extract:         extractor.New(endpointURL),
-		keys:            keys,
-		styles:          styles,
-		urlInput:        NewURLInput(styles),
-		searchInput:     NewSearchInput(styles),
-		spinner: s,
+		state:        stateList,
+		store:        store,
+		extract:      extractor.New(endpointURL),
+		keys:         keys,
+		styles:       styles,
+		urlInput:     NewURLInput(styles),
+		searchInput:  NewSearchInput(styles),
+		spinner:      s,
+		positionFile: filepath.Join(os.TempDir(), fmt.Sprintf("shelf-pos-%d", os.Getpid())),
 	}
 	m.refreshArticles()
 	return m
@@ -218,6 +221,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.err = msg.err
 		}
+		m.savePositionFromFile()
 		// Reload index to pick up any manual edits to markdown metadata.
 		if err := m.store.Reload(); err != nil {
 			m.err = err
@@ -607,6 +611,27 @@ func tmuxPaneAlive(paneID string) bool {
 	return exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{pane_id}").Run() == nil
 }
 
+func isVimEditor(editor string) bool {
+	base := filepath.Base(editor)
+	return base == "vim" || base == "nvim"
+}
+
+// vimEditorCommand builds a shell command string for vim/nvim that:
+// - Opens the file at the saved progress line (if any)
+// - Sets a VimLeave autocmd to write the final cursor position to posFile
+func vimEditorCommand(editor, fpath, posFile string, progress int) string {
+	startArg := ""
+	if progress > 0 {
+		startArg = fmt.Sprintf("+%d ", progress)
+	}
+	// The autocmd writes "absolutePath:lineNum" to posFile on VimLeave.
+	autocmd := fmt.Sprintf(
+		`au VimLeave * call writefile([expand('%%:p') . ':' . line('.')], '%s')`,
+		posFile,
+	)
+	return fmt.Sprintf(`%s %s-c "%s" %q`, editor, startArg, autocmd, fpath)
+}
+
 func (m Model) openSelectedArticle() (tea.Model, tea.Cmd) {
 	if len(m.articles) == 0 || m.cursor >= len(m.articles) {
 		return m, nil
@@ -621,7 +646,7 @@ func (m Model) openSelectedArticle() (tea.Model, tea.Cmd) {
 	}
 
 	if !inTmux() {
-		return m.openArticleExecProcess(editor, fpath)
+		return m.openArticleExecProcess(editor, fpath, article.Progress)
 	}
 
 	// Clean up stale pane ID if pane is dead.
@@ -630,12 +655,25 @@ func (m Model) openSelectedArticle() (tea.Model, tea.Cmd) {
 	}
 
 	// Tmux: reuse existing pane if alive and editor is vim/nvim.
-	editorBase := filepath.Base(editor)
 	if m.tmuxPaneID != "" {
-		if editorBase == "vim" || editorBase == "nvim" {
+		if isVimEditor(editor) {
+			// Save the current file's cursor position before switching.
+			saveCmd := fmt.Sprintf(
+				`:call writefile([expand('%%:p') . ':' . line('.')], '%s')`,
+				m.positionFile,
+			)
+			_ = exec.Command("tmux", "send-keys", "-t", m.tmuxPaneID, saveCmd, "Enter").Run()
+			time.Sleep(50 * time.Millisecond)
+			m.savePositionFromFile()
+
 			// Send :e command to switch files in the existing editor.
+			// Use +LINE to restore saved position.
+			eCmd := fmt.Sprintf(":e %s", fpath)
+			if article.Progress > 0 {
+				eCmd = fmt.Sprintf(":e +%d %s", article.Progress, fpath)
+			}
 			cmd := exec.Command("tmux", "send-keys", "-t", m.tmuxPaneID,
-				fmt.Sprintf(":e %s", fpath), "Enter")
+				eCmd, "Enter")
 			if err := cmd.Run(); err != nil {
 				// send-keys failed (pane might have just died), clear ID and fall through.
 				m.tmuxPaneID = ""
@@ -651,10 +689,15 @@ func (m Model) openSelectedArticle() (tea.Model, tea.Cmd) {
 		shell = "/bin/sh"
 	}
 	channel := fmt.Sprintf("shelf-editor-done-%d", os.Getpid())
+
+	editorCmd := fmt.Sprintf("%s %q", editor, fpath)
+	if isVimEditor(editor) {
+		editorCmd = vimEditorCommand(editor, fpath, m.positionFile, article.Progress)
+	}
 	splitCmd := exec.Command("tmux", "split-window", "-h", "-l", "63%",
 		"-P", "-F", "#{pane_id}",
 		shell, "-l", "-c",
-		fmt.Sprintf("%s %q; tmux wait-for -S %s", editor, fpath, channel))
+		fmt.Sprintf("%s; tmux wait-for -S %s", editorCmd, channel))
 	out, err := splitCmd.Output()
 	if err != nil {
 		m.err = fmt.Errorf("tmux split-window: %w", err)
@@ -669,12 +712,16 @@ func (m Model) openSelectedArticle() (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m Model) openArticleExecProcess(editor, fpath string) (tea.Model, tea.Cmd) {
+func (m Model) openArticleExecProcess(editor, fpath string, progress int) (tea.Model, tea.Cmd) {
 	shell := os.Getenv("SHELL")
 	if shell == "" {
 		shell = "/bin/sh"
 	}
-	c := exec.Command(shell, "-l", "-c", fmt.Sprintf("%s %q", editor, fpath))
+	editorCmd := fmt.Sprintf("%s %q", editor, fpath)
+	if isVimEditor(editor) {
+		editorCmd = vimEditorCommand(editor, fpath, m.positionFile, progress)
+	}
+	c := exec.Command(shell, "-l", "-c", editorCmd)
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
@@ -697,6 +744,33 @@ func (m Model) deleteSelectedArticle() (tea.Model, tea.Cmd) {
 	return m, func() tea.Msg {
 		return articleDeletedMsg{id: article.FilePath}
 	}
+}
+
+// savePositionFromFile reads the vim cursor position file, updates the
+// article's progress in the store, and refreshes the article list.
+func (m *Model) savePositionFromFile() {
+	data, err := os.ReadFile(m.positionFile)
+	if err != nil {
+		return
+	}
+	os.Remove(m.positionFile)
+	// Format: absolutePath:lineNum
+	parts := strings.SplitN(strings.TrimSpace(string(data)), ":", 2)
+	if len(parts) != 2 {
+		return
+	}
+	lineNum, err := strconv.Atoi(parts[1])
+	if err != nil || lineNum <= 0 {
+		return
+	}
+	absPath := parts[0]
+	for _, a := range m.store.List() {
+		if m.store.GetFilePath(a.FilePath) == absPath {
+			_ = m.store.UpdateProgress(a.FilePath, lineNum)
+			break
+		}
+	}
+	m.refreshArticles()
 }
 
 func (m *Model) refreshArticles() {

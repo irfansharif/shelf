@@ -434,6 +434,7 @@ def format_article(title, author, source, markdown):
     lines.append(f"source: {source}")
     lines.append(f"saved: {saved}")
     lines.append("tags:")
+    lines.append("progress:")
     lines.append("---")
     lines.append("")
     lines.append(markdown.rstrip("\n"))

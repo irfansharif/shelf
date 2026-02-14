@@ -108,6 +108,20 @@ func renderArticleItem(meta storage.ArticleMeta, selected bool, width int, style
 	if meta.FileSize > 0 {
 		descParts = append(descParts, formatFileSize(meta.FileSize))
 	}
+	if meta.NoteCount > 0 {
+		if meta.NoteCount == 1 {
+			descParts = append(descParts, "1 note")
+		} else {
+			descParts = append(descParts, fmt.Sprintf("%d notes", meta.NoteCount))
+		}
+	}
+	if meta.Progress > 0 && meta.TotalLines > 0 {
+		pct := meta.Progress * 100 / meta.TotalLines
+		if pct > 100 {
+			pct = 100
+		}
+		descParts = append(descParts, fmt.Sprintf("%d%%", pct))
+	}
 	desc := strings.Join(descParts, " · ")
 
 	// Render tags as styled chips, right-aligned

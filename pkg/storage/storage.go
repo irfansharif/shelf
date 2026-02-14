@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -38,8 +39,11 @@ type ArticleMeta struct {
 	SourceDomain string    // derived from SourceURL
 	SavedAt      time.Time
 	Tags         []string  // optional comma-separated tags
+	Progress     int       // last vim cursor line (from front matter)
+	TotalLines   int       // total lines in file (computed at scan time)
 	FilePath     string    // relative path, derived from disk
 	FileSize     int64     // derived from os.Stat
+	NoteCount    int       // number of [[note]] markers in content
 }
 
 // IsArchived returns true if the article has the "archived" tag.
@@ -94,7 +98,7 @@ func (s *Store) scan() error {
 				continue
 			}
 
-			title, author, source, saved, tags, _, err := parseFrontMatter(string(content))
+			title, author, source, saved, tags, progress, _, err := parseFrontMatter(string(content))
 			if err != nil {
 				continue
 			}
@@ -103,13 +107,16 @@ func (s *Store) scan() error {
 			dirPath := filepath.Join(articlesDir, entry.Name())
 
 			meta := ArticleMeta{
-				Title:     title,
-				Author:    author,
-				SourceURL: source,
-				SavedAt:   saved,
-				Tags:      tags,
-				FilePath:  relPath,
-				FileSize:  calcDirSize(dirPath),
+				Title:        title,
+				Author:       author,
+				SourceURL:    source,
+				SavedAt:      saved,
+				Tags:         tags,
+				Progress:     progress,
+				TotalLines:   strings.Count(string(content), "\n") + 1,
+				FilePath:     relPath,
+				FileSize:     calcDirSize(dirPath),
+				NoteCount:    strings.Count(string(content), "[[note]]"),
 			}
 			if source != "" {
 				if parsed, err := url.Parse(source); err == nil {
@@ -132,19 +139,22 @@ func (s *Store) scan() error {
 				continue
 			}
 
-			title, author, source, saved, tags, _, err := parseFrontMatter(string(content))
+			title, author, source, saved, tags, progress, _, err := parseFrontMatter(string(content))
 			if err != nil {
 				continue
 			}
 
 			meta := ArticleMeta{
-				Title:     title,
-				Author:    author,
-				SourceURL: source,
-				SavedAt:   saved,
-				Tags:      tags,
-				FilePath:  relPath,
-				FileSize:  info.Size(),
+				Title:        title,
+				Author:       author,
+				SourceURL:    source,
+				SavedAt:      saved,
+				Tags:         tags,
+				Progress:     progress,
+				TotalLines:   strings.Count(string(content), "\n") + 1,
+				FilePath:     relPath,
+				FileSize:     info.Size(),
+				NoteCount:    strings.Count(string(content), "[[note]]"),
 			}
 			if source != "" {
 				if parsed, err := url.Parse(source); err == nil {
@@ -178,7 +188,7 @@ func (s *Store) SaveContent(title, content string, images []ImageFile) error {
 		// Directory already exists — find the title of the existing article.
 		existingTitle := slug
 		if data, err := os.ReadFile(filepath.Join(dirPath, "index.md")); err == nil {
-			if t, _, _, _, _, _, err := parseFrontMatter(string(data)); err == nil && t != "" {
+			if t, _, _, _, _, _, _, err := parseFrontMatter(string(data)); err == nil && t != "" {
 				existingTitle = t
 			}
 		}
@@ -236,18 +246,20 @@ func (s *Store) Get(filePath string) (*Article, error) {
 		return nil, fmt.Errorf("reading article file: %w", err)
 	}
 
-	title, author, source, saved, tags, body, err := parseFrontMatter(string(content))
+	title, author, source, saved, tags, progress, body, err := parseFrontMatter(string(content))
 	if err != nil {
 		return nil, fmt.Errorf("parsing front matter: %w", err)
 	}
 
 	meta := ArticleMeta{
-		Title:     title,
-		Author:    author,
-		SourceURL: source,
-		SavedAt:   saved,
-		Tags:      tags,
-		FilePath:  filePath,
+		Title:        title,
+		Author:       author,
+		SourceURL:    source,
+		SavedAt:      saved,
+		Tags:         tags,
+		Progress:     progress,
+		TotalLines:   strings.Count(string(content), "\n") + 1,
+		FilePath:     filePath,
 	}
 	if source != "" {
 		if parsed, err := url.Parse(source); err == nil {
@@ -369,11 +381,11 @@ func slugify(s string) string {
 	return slug
 }
 
-func parseFrontMatter(content string) (title, author, source string, saved time.Time, tags []string, body string, err error) {
+func parseFrontMatter(content string) (title, author, source string, saved time.Time, tags []string, progress int, body string, err error) {
 	// Front matter is delimited by "---\n" at start and "---\n" to close.
 	parts := strings.SplitN(content, "---\n", 3)
 	if len(parts) < 3 || parts[0] != "" {
-		return "", "", "", time.Time{}, nil, content, nil
+		return "", "", "", time.Time{}, nil, 0, content, nil
 	}
 
 	header := parts[1]
@@ -402,7 +414,7 @@ func parseFrontMatter(content string) (title, author, source string, saved time.
 		case "saved":
 			saved, err = time.Parse(time.RFC3339, value)
 			if err != nil {
-				return "", "", "", time.Time{}, nil, "", fmt.Errorf("parsing saved time: %w", err)
+				return "", "", "", time.Time{}, nil, 0, "", fmt.Errorf("parsing saved time: %w", err)
 			}
 		case "tags":
 			for _, t := range strings.Split(value, ",") {
@@ -411,6 +423,8 @@ func parseFrontMatter(content string) (title, author, source string, saved time.
 					tags = append(tags, t)
 				}
 			}
+		case "progress":
+			progress, _ = strconv.Atoi(strings.TrimPrefix(value, "L"))
 		}
 	}
 
@@ -457,6 +471,60 @@ func (s *Store) UpdateTags(filePath string, tags []string) error {
 	}
 
 	return s.scan()
+}
+
+// UpdateProgress rewrites the progress field in an article's front matter.
+func (s *Store) UpdateProgress(filePath string, line int) error {
+	fullPath := filepath.Join(s.basePath, filePath)
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
+		return fmt.Errorf("reading article: %w", err)
+	}
+
+	updated, err := replaceProgress(string(content), line)
+	if err != nil {
+		return err
+	}
+
+	tmpPath := fullPath + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(updated), 0644); err != nil {
+		return fmt.Errorf("writing tmp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, fullPath); err != nil {
+		return fmt.Errorf("renaming tmp file: %w", err)
+	}
+
+	return s.scan()
+}
+
+// replaceProgress splices the progress: field in front matter text.
+func replaceProgress(content string, line int) (string, error) {
+	parts := strings.SplitN(content, "---\n", 3)
+	if len(parts) < 3 || parts[0] != "" {
+		return "", fmt.Errorf("invalid front matter")
+	}
+
+	header := parts[1]
+	body := parts[2]
+
+	newLine := fmt.Sprintf("progress: L%d\n", line)
+
+	var newHeader strings.Builder
+	found := false
+	for _, l := range strings.Split(header, "\n") {
+		trimmed := strings.TrimSpace(l)
+		if strings.HasPrefix(trimmed, "progress:") {
+			newHeader.WriteString(newLine)
+			found = true
+		} else if trimmed != "" {
+			newHeader.WriteString(l + "\n")
+		}
+	}
+	if !found {
+		newHeader.WriteString(newLine)
+	}
+
+	return "---\n" + newHeader.String() + "---\n" + body, nil
 }
 
 // replaceTags splices the tags: line in front matter text.
