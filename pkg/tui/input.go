@@ -56,8 +56,9 @@ func (m URLInputModel) Value() string {
 // SetWidth sets the available width for the URL input.
 func (m URLInputModel) SetWidth(w int) URLInputModel {
 	m.width = w
-	// SearchBoxActive: Width (content+padding) = w-6, inner content = w-6-2, minus icon (2)
-	m.textInput.Width = w - 6 - 2 - 2
+	// SearchBoxActive: Width (content+padding) = w-6, inner content = w-6-2, minus icon (3)
+	// Icon is 3 because lipgloss SetString adds a separator space: "⌕ " + " " = 3 columns.
+	m.textInput.Width = w - 6 - 2 - 3
 	return m
 }
 
@@ -155,8 +156,9 @@ func (m SearchInputModel) Value() string {
 // SetWidth sets the available width for the search input.
 func (m SearchInputModel) SetWidth(w int) SearchInputModel {
 	m.width = w
-	// SearchBox: Width (content+padding) = w-6, inner content = w-6-2, minus icon (2)
-	m.textInput.Width = w - 6 - 2 - 2
+	// SearchBox: Width (content+padding) = w-6, inner content = w-6-2, minus icon (3)
+	// Icon is 3 because lipgloss SetString adds a separator space: "⌕ " + " " = 3 columns.
+	m.textInput.Width = w - 6 - 2 - 3
 	return m
 }
 

@@ -33,6 +33,7 @@ const (
 	stateGatheringTabs
 	stateImporting
 	stateSafariWaiting
+	stateHelp
 )
 
 // Model is the main TUI model.
@@ -348,6 +349,10 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleConfirmOverwriteKeys(msg)
 	case stateConfirmDelete:
 		return m.handleConfirmDeleteKeys(msg)
+	case stateHelp:
+		// Any key exits help.
+		m.state = stateList
+		return m, nil
 	}
 
 	// Any keypress in the list clears a previous status/error toast.
@@ -417,6 +422,9 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Search):
 		m.state = stateSearch
+		m.searchInput = m.searchInput.Clear()
+		m.refreshArticles()
+		m.cursor = 0
 		var cmd tea.Cmd
 		m.searchInput, cmd = m.searchInput.Activate()
 		return m, cmd
@@ -440,6 +448,10 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.spinner.Tick,
 			m.extractArticle(article.SourceURL),
 		)
+
+	case key.Matches(msg, m.keys.Help):
+		m.state = stateHelp
+		return m, nil
 
 	case key.Matches(msg, m.keys.SafariReload):
 		if len(m.articles) == 0 || m.cursor >= len(m.articles) {
@@ -479,15 +491,17 @@ func (m Model) handleAddURLKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		rawURL := strings.TrimSpace(m.urlInput.Value())
 		if rawURL == "" {
 			m.state = stateList
+			m.err = fmt.Errorf("URL cannot be empty")
 			return m, nil
 		}
 		// Validate URL format before sending to the server.
+		originalURL := rawURL
 		if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
 			rawURL = "https://" + rawURL
 			m.urlInput = m.urlInput.SetValue(rawURL)
 		}
 		if u, err := neturl.Parse(rawURL); err != nil || u.Host == "" || !strings.Contains(u.Host, ".") {
-			m.err = fmt.Errorf("invalid URL: %s", rawURL)
+			m.err = fmt.Errorf("invalid URL: %s", originalURL)
 			m.state = stateList
 			return m, nil
 		}
@@ -929,7 +943,8 @@ func (m Model) View() string {
 	if m.showArchived {
 		sb.WriteString(m.styles.Muted.Render(" (+archived)"))
 	}
-	if m.state != stateAddURL && m.state != stateLoading && m.state != stateConfirmOverwrite && m.state != stateConfirmDelete && m.state != stateGatheringTabs && m.state != stateImporting && m.state != stateSafariWaiting {
+	showCounts := m.state != stateAddURL && m.state != stateLoading && m.state != stateConfirmOverwrite && m.state != stateConfirmDelete && m.state != stateGatheringTabs && m.state != stateImporting && m.state != stateSafariWaiting && m.state != stateHelp
+	if showCounts {
 		if m.searchInput.Value() != "" {
 			total := len(m.applyArchiveFilter(m.store.List()))
 			if filtered == 0 {
@@ -940,6 +955,19 @@ func (m Model) View() string {
 		} else {
 			sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" (%d of %d)", m.cursor+1, filtered)))
 		}
+		// Show archived count hint when archived articles are hidden.
+		if !m.showArchived {
+			allArticles := m.store.List()
+			archivedCount := 0
+			for _, a := range allArticles {
+				if a.IsArchived() {
+					archivedCount++
+				}
+			}
+			if archivedCount > 0 {
+				sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" · %d archived", archivedCount)))
+			}
+		}
 	}
 	sb.WriteString("\n\n")
 
@@ -947,8 +975,8 @@ func (m Model) View() string {
 	switch m.state {
 	case stateAddURL, stateLoading, stateConfirmOverwrite, stateSafariWaiting:
 		sb.WriteString(m.urlInput.View())
-	case stateGatheringTabs, stateImporting:
-		// No input bar during import workflow.
+	case stateGatheringTabs, stateImporting, stateHelp:
+		// No input bar during import or help.
 	default:
 		sb.WriteString(m.searchInput.View())
 	}
@@ -962,7 +990,8 @@ func (m Model) View() string {
 		sb.WriteString(m.spinner.View())
 		sb.WriteString(" Fetching article...")
 	case stateConfirmDelete:
-		sb.WriteString(fmt.Sprintf("Delete %q? This cannot be undone. [y/n]", m.pendingDeleteTitle))
+		// Show the article list with the confirmation inline as a status message.
+		sb.WriteString(m.renderList())
 	case stateConfirmOverwrite:
 		if m.pendingResult != nil {
 			sb.WriteString(fmt.Sprintf("Article %q already exists. Overwrite? [y/n]", m.pendingResult.Title))
@@ -991,13 +1020,31 @@ func (m Model) View() string {
 			}
 			sb.WriteString(" " + strings.Join(details, ", "))
 		}
+	case stateHelp:
+		sb.WriteString(m.renderHelpOverlay())
 	default:
 		sb.WriteString(m.renderList())
 	}
 
 	// Status/error message — placed just above the footer help text.
 	var statusLine string
-	if m.err != nil {
+	if m.state == stateConfirmDelete {
+		usable := m.width - 4
+		title := m.pendingDeleteTitle
+		full := fmt.Sprintf("Delete %q? This cannot be undone. [y/n]", title)
+		if len(full) > usable && usable > 20 {
+			overhead := len("Delete \"\"? This cannot be undone. [y/n]")
+			maxTitle := usable - overhead
+			if maxTitle > 3 {
+				title = truncateString(title, maxTitle)
+				full = fmt.Sprintf("Delete %q? This cannot be undone. [y/n]", title)
+			} else {
+				// Title won't fit; drop it entirely.
+				full = "Delete this article? [y/n]"
+			}
+		}
+		statusLine = m.styles.Error.Render(full)
+	} else if m.err != nil {
 		statusLine = m.styles.Error.Render(fmt.Sprintf("Error: %v", m.err))
 	} else if m.statusMsg != "" {
 		statusLine = m.styles.Muted.Render(m.statusMsg)
@@ -1063,11 +1110,23 @@ func (m Model) renderList() string {
 		}
 	}
 
+	contentWidth := m.width - 4
+	if contentWidth > 120 {
+		contentWidth = 120
+	}
+
 	for i := start; i < end; i++ {
 		if i > start {
 			if i == archiveBoundary {
-				// Draw a separator line between non-archived and archived groups.
-				sep := strings.Repeat("─", m.width-4)
+				// Draw a labeled separator between non-archived and archived groups.
+				label := " archived "
+				dashCount := contentWidth - len(label)
+				if dashCount < 2 {
+					dashCount = 2
+				}
+				left := dashCount / 2
+				right := dashCount - left
+				sep := strings.Repeat("─", left) + label + strings.Repeat("─", right)
 				sb.WriteString("\n\n")
 				sb.WriteString(m.styles.Muted.Render(sep))
 				sb.WriteString("\n\n")
@@ -1076,7 +1135,7 @@ func (m Model) renderList() string {
 			}
 		}
 		selected := i == m.cursor
-		sb.WriteString(renderArticleItem(m.articles[i], selected, m.width-4, m.styles))
+		sb.WriteString(renderArticleItem(m.articles[i], selected, contentWidth, m.styles))
 	}
 
 	return sb.String()
@@ -1089,7 +1148,7 @@ func (m Model) renderHelp() string {
 	case stateAddURL:
 		parts = append(parts, "[enter] fetch", "[ctrl+c] clear", "[esc] cancel")
 	case stateSearch:
-		parts = append(parts, "[enter] done", "[ctrl+c] clear", "[esc] clear")
+		parts = append(parts, "[enter] done", "[ctrl+c] clear", "[esc] cancel")
 	case stateLoading:
 		parts = append(parts, "[esc] cancel")
 	case stateConfirmDelete:
@@ -1102,6 +1161,8 @@ func (m Model) renderHelp() string {
 		parts = append(parts, "[esc] cancel")
 	case stateImporting:
 		parts = append(parts, "[esc] cancel")
+	case stateHelp:
+		parts = append(parts, "press any key to close")
 	default:
 		archiveLabel := "[x/X] archive/show"
 		if len(m.articles) > 0 && m.cursor < len(m.articles) && m.articles[m.cursor].IsArchived() {
@@ -1121,6 +1182,7 @@ func (m Model) renderHelp() string {
 			archiveLabel,
 			"[/] search",
 			"[r/R]efetch",
+			"[?] help",
 			"[q]uit",
 		)
 	}
@@ -1145,4 +1207,46 @@ func (m Model) renderHelp() string {
 		}
 	}
 	return result
+}
+
+func (m Model) renderHelpOverlay() string {
+	var sb strings.Builder
+
+	sb.WriteString(m.styles.SelectedTitle.Render("Keybindings"))
+	sb.WriteString("\n\n")
+
+	lines := []struct{ key, desc string }{
+		{"j / ↓", "Move down"},
+		{"k / ↑", "Move up"},
+		{"g / Home", "Go to top"},
+		{"G / End", "Go to bottom"},
+		{"", ""},
+		{"Enter", "Open article in editor"},
+		{"a", "Add URL"},
+		{"d", "Delete article"},
+		{"/", "Search articles"},
+		{"", ""},
+		{"x", "Archive / unarchive"},
+		{"X", "Show / hide archived"},
+		{"r", "Re-fetch article"},
+		{"R", "Re-fetch via Safari"},
+		{"i", "Import from Safari"},
+		{"", ""},
+		{"?", "Show this help"},
+		{"q", "Quit"},
+	}
+
+	for _, l := range lines {
+		if l.key == "" {
+			sb.WriteString("\n")
+			continue
+		}
+		padded := l.key + strings.Repeat(" ", 12-len(l.key))
+		sb.WriteString("  ")
+		sb.WriteString(m.styles.SelectedTitle.Render(padded))
+		sb.WriteString(m.styles.Muted.Render(l.desc))
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
 }
