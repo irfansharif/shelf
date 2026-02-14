@@ -74,8 +74,9 @@ func (m URLInputModel) SetValue(s string) URLInputModel {
 }
 
 // Focus focuses the input.
-func (m URLInputModel) Focus() tea.Cmd {
-	return m.textInput.Focus()
+func (m URLInputModel) Focus() (URLInputModel, tea.Cmd) {
+	cmd := m.textInput.Focus()
+	return m, cmd
 }
 
 // Blur removes focus from the input, hiding the cursor.

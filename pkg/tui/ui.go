@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -69,6 +70,9 @@ type Model struct {
 	// Status
 	err        error
 	statusMsg  string
+
+	// Tmux split
+	tmuxPaneID string // tmux pane ID for the editor split (e.g. "%42")
 }
 
 // Messages
@@ -210,6 +214,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case editorFinishedMsg:
+		m.tmuxPaneID = ""
 		if msg.err != nil {
 			m.err = msg.err
 		}
@@ -335,7 +340,9 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state = stateAddURL
 		m.urlInput = m.urlInput.Reset()
 		m.err = nil
-		return m, m.urlInput.Focus()
+		var cmd tea.Cmd
+		m.urlInput, cmd = m.urlInput.Focus()
+		return m, cmd
 
 	case key.Matches(msg, m.keys.Import):
 		m.state = stateGatheringTabs
@@ -592,6 +599,14 @@ func (m Model) handleConfirmOverwriteKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 
+func inTmux() bool {
+	return os.Getenv("TMUX") != ""
+}
+
+func tmuxPaneAlive(paneID string) bool {
+	return exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{pane_id}").Run() == nil
+}
+
 func (m Model) openSelectedArticle() (tea.Model, tea.Cmd) {
 	if len(m.articles) == 0 || m.cursor >= len(m.articles) {
 		return m, nil
@@ -605,17 +620,64 @@ func (m Model) openSelectedArticle() (tea.Model, tea.Cmd) {
 		editor = "nvim"
 	}
 
-	// Run editor through a login shell to ensure config files are loaded
+	if !inTmux() {
+		return m.openArticleExecProcess(editor, fpath)
+	}
+
+	// Clean up stale pane ID if pane is dead.
+	if m.tmuxPaneID != "" && !tmuxPaneAlive(m.tmuxPaneID) {
+		m.tmuxPaneID = ""
+	}
+
+	// Tmux: reuse existing pane if alive and editor is vim/nvim.
+	editorBase := filepath.Base(editor)
+	if m.tmuxPaneID != "" {
+		if editorBase == "vim" || editorBase == "nvim" {
+			// Send :e command to switch files in the existing editor.
+			cmd := exec.Command("tmux", "send-keys", "-t", m.tmuxPaneID,
+				fmt.Sprintf(":e %s", fpath), "Enter")
+			if err := cmd.Run(); err != nil {
+				// send-keys failed (pane might have just died), clear ID and fall through.
+				m.tmuxPaneID = ""
+			} else {
+				return m, nil
+			}
+		}
+	}
+
+	// Tmux: open a new split pane.
 	shell := os.Getenv("SHELL")
 	if shell == "" {
 		shell = "/bin/sh"
 	}
+	channel := fmt.Sprintf("shelf-editor-done-%d", os.Getpid())
+	splitCmd := exec.Command("tmux", "split-window", "-h", "-l", "63%",
+		"-P", "-F", "#{pane_id}",
+		shell, "-l", "-c",
+		fmt.Sprintf("%s %q; tmux wait-for -S %s", editor, fpath, channel))
+	out, err := splitCmd.Output()
+	if err != nil {
+		m.err = fmt.Errorf("tmux split-window: %w", err)
+		return m, nil
+	}
+	m.tmuxPaneID = strings.TrimSpace(string(out))
 
+	// Block in background until the editor exits.
+	return m, func() tea.Msg {
+		err := exec.Command("tmux", "wait-for", channel).Run()
+		return editorFinishedMsg{err: err}
+	}
+}
+
+func (m Model) openArticleExecProcess(editor, fpath string) (tea.Model, tea.Cmd) {
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
 	c := exec.Command(shell, "-l", "-c", fmt.Sprintf("%s %q", editor, fpath))
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
-
 	return m, tea.ExecProcess(c, func(err error) tea.Msg {
 		return editorFinishedMsg{err: err}
 	})
