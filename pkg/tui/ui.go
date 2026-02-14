@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"fmt"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +29,7 @@ const (
 	stateLoading
 	stateSearch
 	stateConfirmOverwrite
+	stateConfirmDelete
 	stateGatheringTabs
 	stateImporting
 	stateSafariWaiting
@@ -60,6 +62,10 @@ type Model struct {
 	pendingResult  *extractor.ExtractResult // post-fetch slug collision
 	overwritePath  string                   // pre-fetch URL match: file path to delete
 	overwriteTitle string                   // pre-fetch URL match: title for display
+
+	// Delete confirmation
+	pendingDeletePath  string // file path of article pending deletion
+	pendingDeleteTitle string // title for display in confirmation prompt
 
 	// Import state
 	importQueue   []string
@@ -119,6 +125,11 @@ func New(store *storage.Store, endpointURL string) Model {
 	}
 	m.refreshArticles()
 	return m
+}
+
+// InListState reports whether the model is in the default list browsing state.
+func (m Model) InListState() bool {
+	return m.state == stateList
 }
 
 // Init initializes the model.
@@ -252,7 +263,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case stateSearch:
 		m.searchInput, cmd = m.searchInput.Update(msg)
 		// Update filtered articles
-		m.articles = m.store.Search(m.searchInput.Value())
+		m.articles = m.applyArchiveFilter(m.store.Search(m.searchInput.Value()))
 		if m.cursor >= len(m.articles) {
 			m.cursor = max(0, len(m.articles)-1)
 		}
@@ -269,7 +280,7 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case stateSearch:
 		return m.handleSearchKeys(msg)
 	case stateLoading, stateGatheringTabs:
-		// Only allow quit during loading
+		// Allow quit or cancel during loading
 		if key.Matches(msg, m.keys.Quit) || key.Matches(msg, m.keys.Cancel) {
 			m.state = stateList
 			return m, nil
@@ -304,6 +315,8 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case stateConfirmOverwrite:
 		return m.handleConfirmOverwriteKeys(msg)
+	case stateConfirmDelete:
+		return m.handleConfirmDeleteKeys(msg)
 	}
 
 	// Any keypress in the list clears a previous status/error toast.
@@ -354,7 +367,14 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.spinner.Tick, gatherSafariTabs())
 
 	case key.Matches(msg, m.keys.Delete):
-		return m.deleteSelectedArticle()
+		if len(m.articles) == 0 || m.cursor >= len(m.articles) {
+			return m, nil
+		}
+		article := m.articles[m.cursor]
+		m.pendingDeletePath = article.FilePath
+		m.pendingDeleteTitle = article.Title
+		m.state = stateConfirmDelete
+		return m, nil
 
 	case key.Matches(msg, m.keys.Archive):
 		return m.archiveSelectedArticle()
@@ -424,11 +444,22 @@ func (m Model) handleAddURLKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.Submit):
-		url := strings.TrimSpace(m.urlInput.Value())
-		if url == "" {
+		rawURL := strings.TrimSpace(m.urlInput.Value())
+		if rawURL == "" {
 			m.state = stateList
 			return m, nil
 		}
+		// Validate URL format before sending to the server.
+		if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
+			rawURL = "https://" + rawURL
+			m.urlInput = m.urlInput.SetValue(rawURL)
+		}
+		if u, err := neturl.Parse(rawURL); err != nil || u.Host == "" || !strings.Contains(u.Host, ".") {
+			m.err = fmt.Errorf("invalid URL: %s", rawURL)
+			m.state = stateList
+			return m, nil
+		}
+		url := rawURL
 		m.urlInput = m.urlInput.Blur()
 		// Check if an article from this URL already exists.
 		for _, a := range m.store.List() {
@@ -507,7 +538,7 @@ func (m Model) handleSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.searchInput, cmd = m.searchInput.Update(msg)
 	// Update filtered results
-	m.articles = m.store.Search(m.searchInput.Value())
+	m.articles = m.applyArchiveFilter(m.store.Search(m.searchInput.Value()))
 	if m.cursor >= len(m.articles) {
 		m.cursor = max(0, len(m.articles)-1)
 	}
@@ -602,6 +633,29 @@ func (m Model) handleConfirmOverwriteKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+
+func (m Model) handleConfirmDeleteKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		path := m.pendingDeletePath
+		m.pendingDeletePath = ""
+		m.pendingDeleteTitle = ""
+		m.state = stateList
+		if err := m.store.Delete(path); err != nil {
+			m.err = err
+			return m, nil
+		}
+		return m, func() tea.Msg {
+			return articleDeletedMsg{id: path}
+		}
+	case "n", "N", "esc":
+		m.state = stateList
+		m.pendingDeletePath = ""
+		m.pendingDeleteTitle = ""
+		return m, nil
+	}
+	return m, nil
+}
 
 func inTmux() bool {
 	return os.Getenv("TMUX") != ""
@@ -730,22 +784,6 @@ func (m Model) openArticleExecProcess(editor, fpath string, progress int) (tea.M
 	})
 }
 
-func (m Model) deleteSelectedArticle() (tea.Model, tea.Cmd) {
-	if len(m.articles) == 0 || m.cursor >= len(m.articles) {
-		return m, nil
-	}
-
-	article := m.articles[m.cursor]
-	if err := m.store.Delete(article.FilePath); err != nil {
-		m.err = err
-		return m, nil
-	}
-
-	return m, func() tea.Msg {
-		return articleDeletedMsg{id: article.FilePath}
-	}
-}
-
 // savePositionFromFile reads the vim cursor position file, updates the
 // article's progress in the store, and refreshes the article list.
 func (m *Model) savePositionFromFile() {
@@ -775,7 +813,7 @@ func (m *Model) savePositionFromFile() {
 
 func (m *Model) refreshArticles() {
 	if m.searchInput.Value() != "" {
-		m.articles = m.store.Search(m.searchInput.Value())
+		m.articles = m.applyArchiveFilter(m.store.Search(m.searchInput.Value()))
 	} else {
 		m.articles = m.applyArchiveFilter(m.store.List())
 	}
@@ -829,6 +867,13 @@ func (m Model) archiveSelectedArticle() (tea.Model, tea.Cmd) {
 	}
 
 	m.refreshArticles()
+	// Move cursor to the article's new position in the list.
+	for i, a := range m.articles {
+		if a.FilePath == article.FilePath {
+			m.cursor = i
+			break
+		}
+	}
 	return m, nil
 }
 
@@ -846,9 +891,14 @@ func (m Model) View() string {
 	if m.showArchived {
 		sb.WriteString(m.styles.Muted.Render(" (+archived)"))
 	}
-	if m.state != stateAddURL && m.state != stateLoading && m.state != stateConfirmOverwrite && m.state != stateGatheringTabs && m.state != stateImporting && m.state != stateSafariWaiting {
+	if m.state != stateAddURL && m.state != stateLoading && m.state != stateConfirmOverwrite && m.state != stateConfirmDelete && m.state != stateGatheringTabs && m.state != stateImporting && m.state != stateSafariWaiting {
 		if m.searchInput.Value() != "" {
-			sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" (%d of %d of %d)", m.cursor+1, filtered, m.store.Count())))
+			total := len(m.applyArchiveFilter(m.store.List()))
+			if filtered == 0 {
+				sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" (0 of %d)", total)))
+			} else {
+				sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" (%d of %d of %d)", m.cursor+1, filtered, total)))
+			}
 		} else {
 			sb.WriteString(m.styles.Muted.Render(fmt.Sprintf(" (%d of %d)", m.cursor+1, filtered)))
 		}
@@ -873,6 +923,8 @@ func (m Model) View() string {
 	case stateLoading:
 		sb.WriteString(m.spinner.View())
 		sb.WriteString(" Fetching article...")
+	case stateConfirmDelete:
+		sb.WriteString(fmt.Sprintf("Delete %q? This cannot be undone. [y/n]", m.pendingDeleteTitle))
 	case stateConfirmOverwrite:
 		if m.pendingResult != nil {
 			sb.WriteString(fmt.Sprintf("Article %q already exists. Overwrite? [y/n]", m.pendingResult.Title))
@@ -1002,6 +1054,8 @@ func (m Model) renderHelp() string {
 		parts = append(parts, "[enter] done", "[ctrl+c] clear", "[esc] clear")
 	case stateLoading:
 		parts = append(parts, "[esc] cancel")
+	case stateConfirmDelete:
+		parts = append(parts, "[y] delete", "[n] cancel")
 	case stateConfirmOverwrite:
 		parts = append(parts, "[y] overwrite", "[n] cancel")
 	case stateSafariWaiting:

@@ -54,6 +54,31 @@ type endpointImageData struct {
 	Data string `json:"data"` // base64-encoded
 }
 
+// formatEndpointError parses the Modal endpoint's JSON error response and
+// returns a user-friendly error message.
+func formatEndpointError(statusCode int, body []byte) error {
+	// Try to parse the JSON error body.
+	var errResp struct {
+		Error string `json:"error"`
+		Type  string `json:"type"`
+	}
+	if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+		msg := strings.TrimSpace(errResp.Error)
+		// Detect common HTTP errors embedded in the message.
+		if strings.Contains(msg, "403") {
+			return fmt.Errorf("site blocked the request (HTTP 403); try refetching with Safari (R)")
+		}
+		if strings.Contains(msg, "404") {
+			return fmt.Errorf("page not found (HTTP 404)")
+		}
+		if strings.Contains(msg, "Could not resolve host") {
+			return fmt.Errorf("could not resolve host")
+		}
+		return fmt.Errorf("conversion failed: %s", msg)
+	}
+	return fmt.Errorf("conversion failed (HTTP %d)", statusCode)
+}
+
 // Extract fetches HTML from a URL and converts it to markdown via the Modal endpoint.
 func (e *Extractor) Extract(sourceURL string) (*ExtractResult, error) {
 	parsed, err := url.Parse(sourceURL)
@@ -78,7 +103,7 @@ func (e *Extractor) Extract(sourceURL string) (*ExtractResult, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("markdown conversion HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, formatEndpointError(resp.StatusCode, respBody)
 	}
 
 	var result endpointResponse
@@ -121,7 +146,7 @@ func (e *Extractor) ExtractFromHTML(sourceURL, rawHTML string) (*ExtractResult, 
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("process endpoint HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, formatEndpointError(resp.StatusCode, respBody)
 	}
 
 	var result endpointResponse

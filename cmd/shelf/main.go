@@ -30,7 +30,19 @@ func main() {
 	}
 
 	model := tui.New(store, cfg.Endpoint)
-	p := tea.NewProgram(model, tea.WithAltScreen())
+
+	// Filter out SIGINT-generated QuitMsg when not in list state, so that
+	// Ctrl+C cancels the current operation instead of killing the app.
+	filter := func(m tea.Model, msg tea.Msg) tea.Msg {
+		if _, ok := msg.(tea.QuitMsg); ok {
+			if model, ok := m.(tui.Model); ok && !model.InListState() {
+				return nil
+			}
+		}
+		return msg
+	}
+
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithFilter(filter))
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running program: %v\n", err)
