@@ -78,17 +78,33 @@ type Model struct {
 	err        error
 	statusMsg  string
 
+	// Fetch generation counter — incremented when a fetch starts, checked
+	// when results arrive. Stale results (from cancelled fetches) are
+	// discarded.
+	fetchGen uint64
+
 	// Tmux split
 	tmuxPaneID   string // tmux pane ID for the editor split (e.g. "%42")
 	positionFile string // temp file where vim writes cursor position on exit
+
+	// suppressQuit is set when ctrl+c cancels a non-list state. This
+	// prevents the SIGINT-generated QuitMsg (which arrives after the
+	// KeyMsg transitions state to stateList) from killing the app.
+	suppressQuit bool
 }
 
 // Messages
 type (
 	articlesFetchedMsg  struct{ articles []storage.ArticleMeta }
-	articleExtractedMsg struct{ result *extractor.ExtractResult }
-	articleDeletedMsg   struct{ id string }
-	extractionErrMsg    struct{ err error }
+	articleExtractedMsg struct {
+		result *extractor.ExtractResult
+		gen    uint64
+	}
+	articleDeletedMsg struct{ id string }
+	extractionErrMsg struct {
+		err error
+		gen uint64
+	}
 	editorFinishedMsg   struct{ err error }
 	clearStatusMsg          struct{}
 	safariOpenedMsg         struct {
@@ -127,9 +143,10 @@ func New(store *storage.Store, endpointURL string) Model {
 	return m
 }
 
-// InListState reports whether the model is in the default list browsing state.
+// InListState reports whether the model is in the default list browsing state
+// and not suppressing a quit from a recent ctrl+c cancel.
 func (m Model) InListState() bool {
-	return m.state == stateList
+	return m.state == stateList && !m.suppressQuit
 }
 
 // Init initializes the model.
@@ -139,6 +156,8 @@ func (m Model) Init() tea.Cmd {
 
 // Update handles messages and updates the model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.suppressQuit = false
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -159,6 +178,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case articleExtractedMsg:
+		// Discard results from cancelled fetches.
+		if msg.gen != m.fetchGen {
+			return m, nil
+		}
 		images := make([]storage.ImageFile, len(msg.result.Images))
 		for i, img := range msg.result.Images {
 			images[i] = storage.ImageFile{Path: img.Path, Data: img.Data}
@@ -211,12 +234,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.state = stateLoading
+		m.fetchGen++
 		return m, tea.Batch(
 			m.spinner.Tick,
 			m.extractArticleFromHTML(msg.url, msg.html),
 		)
 
 	case extractionErrMsg:
+		if msg.gen != m.fetchGen {
+			return m, nil
+		}
 		m.state = stateList
 		m.err = msg.err
 		m.statusMsg = ""
@@ -281,8 +308,10 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleSearchKeys(msg)
 	case stateLoading, stateGatheringTabs:
 		// Allow quit or cancel during loading
-		if key.Matches(msg, m.keys.Quit) || key.Matches(msg, m.keys.Cancel) {
+		if key.Matches(msg, m.keys.Quit) || key.Matches(msg, m.keys.Cancel) || msg.String() == "ctrl+c" {
 			m.state = stateList
+			m.suppressQuit = true
+			m.fetchGen++ // invalidate in-flight results
 			return m, nil
 		}
 		return m, nil
@@ -291,11 +320,12 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Submit): // Enter
 			m.state = stateLoading
 			return m, tea.Batch(m.spinner.Tick, m.extractSafariHTML())
-		case key.Matches(msg, m.keys.Cancel), key.Matches(msg, m.keys.Quit):
+		case key.Matches(msg, m.keys.Cancel), key.Matches(msg, m.keys.Quit), msg.String() == "ctrl+c":
 			if m.safariWindow != nil {
 				_ = m.safariWindow.Close()
 			}
 			m.state = stateList
+			m.suppressQuit = true
 			m.overwritePath = ""
 			m.overwriteTitle = ""
 			m.safariURL = ""
@@ -305,9 +335,10 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case stateImporting:
 		// Cancel stops remaining imports but keeps already-saved articles.
-		if key.Matches(msg, m.keys.Cancel) || key.Matches(msg, m.keys.Quit) {
+		if key.Matches(msg, m.keys.Cancel) || key.Matches(msg, m.keys.Quit) || msg.String() == "ctrl+c" {
 			m.importQueue = nil
 			m.state = stateList
+			m.suppressQuit = true
 			m.refreshArticles()
 			m.statusMsg = m.importSummary() + " (cancelled)"
 			return m, nil
@@ -404,6 +435,7 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.overwritePath = article.FilePath
 		m.overwriteTitle = article.Title
 		m.state = stateLoading
+		m.fetchGen++
 		return m, tea.Batch(
 			m.spinner.Tick,
 			m.extractArticle(article.SourceURL),
@@ -495,6 +527,7 @@ func (m Model) handleAddURLKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.state = stateLoading
+		m.fetchGen++
 		return m, tea.Batch(
 			m.spinner.Tick,
 			m.extractArticle(url),
@@ -546,22 +579,24 @@ func (m Model) handleSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) extractArticle(url string) tea.Cmd {
+	gen := m.fetchGen
 	return func() tea.Msg {
 		result, err := m.extract.Extract(url)
 		if err != nil {
-			return extractionErrMsg{err: err}
+			return extractionErrMsg{err: err, gen: gen}
 		}
-		return articleExtractedMsg{result: result}
+		return articleExtractedMsg{result: result, gen: gen}
 	}
 }
 
 func (m Model) extractArticleFromHTML(url, html string) tea.Cmd {
+	gen := m.fetchGen
 	return func() tea.Msg {
 		result, err := m.extract.ExtractFromHTML(url, html)
 		if err != nil {
-			return extractionErrMsg{err: err}
+			return extractionErrMsg{err: err, gen: gen}
 		}
-		return articleExtractedMsg{result: result}
+		return articleExtractedMsg{result: result, gen: gen}
 	}
 }
 
@@ -619,12 +654,14 @@ func (m Model) handleConfirmOverwriteKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Pre-fetch URL match: proceed to fetch (overwritePath stays set).
 		url := strings.TrimSpace(m.urlInput.Value())
 		m.state = stateLoading
+		m.fetchGen++
 		return m, tea.Batch(
 			m.spinner.Tick,
 			m.extractArticle(url),
 		)
-	case "n", "N", "esc":
+	case "n", "N", "esc", "ctrl+c":
 		m.state = stateList
+		m.suppressQuit = true
 		m.pendingResult = nil
 		m.overwritePath = ""
 		m.overwriteTitle = ""
@@ -648,8 +685,9 @@ func (m Model) handleConfirmDeleteKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg {
 			return articleDeletedMsg{id: path}
 		}
-	case "n", "N", "esc":
+	case "n", "N", "esc", "ctrl+c":
 		m.state = stateList
+		m.suppressQuit = true
 		m.pendingDeletePath = ""
 		m.pendingDeleteTitle = ""
 		return m, nil
@@ -1087,5 +1125,24 @@ func (m Model) renderHelp() string {
 		)
 	}
 
-	return strings.Join(parts, "  ")
+	usable := m.width - 4 // account for App padding
+	sep := "  "
+	result := strings.Join(parts, sep)
+	if len(result) > usable && usable > 0 {
+		// Try single-space separator first.
+		sep = " "
+		result = strings.Join(parts, sep)
+	}
+	if len(result) > usable && usable > 0 {
+		// Drop items from the end (least important) until it fits,
+		// but always keep the last item (quit/cancel).
+		for len(parts) > 2 {
+			parts = append(parts[:len(parts)-2], parts[len(parts)-1])
+			result = strings.Join(parts, sep)
+			if len(result) <= usable {
+				break
+			}
+		}
+	}
+	return result
 }

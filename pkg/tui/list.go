@@ -120,7 +120,9 @@ func renderArticleItem(meta storage.ArticleMeta, selected bool, width int, style
 		if pct > 100 {
 			pct = 100
 		}
-		descParts = append(descParts, fmt.Sprintf("%d%%", pct))
+		if pct > 0 {
+			descParts = append(descParts, fmt.Sprintf("%d%%", pct))
+		}
 	}
 	desc := strings.Join(descParts, " · ")
 
@@ -135,6 +137,13 @@ func renderArticleItem(meta storage.ArticleMeta, selected bool, width int, style
 	}
 
 	lineWidth := width - 2 // usable width after 2-char indent
+	// Truncate description to fit available width (reserving space for tags).
+	descWidth := lineWidth
+	if tagStr != "" {
+		descWidth = lineWidth - lipgloss.Width(tagStr) - 1 // 1 for padding
+	}
+	desc = truncateString(desc, descWidth)
+
 	if selected {
 		sb.WriteString(styles.SelectionMarker.Render(""))
 		sb.WriteString(styles.SelectedTitle.Render(title))

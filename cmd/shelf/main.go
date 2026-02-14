@@ -31,10 +31,12 @@ func main() {
 
 	model := tui.New(store, cfg.Endpoint)
 
-	// Filter out SIGINT-generated QuitMsg when not in list state, so that
-	// Ctrl+C cancels the current operation instead of killing the app.
+	// Filter out SIGINT-generated quit/interrupt messages when not in list
+	// state, so that Ctrl+C cancels the current operation instead of killing
+	// the app. Bubbletea v1 sends InterruptMsg for SIGINT (not QuitMsg).
 	filter := func(m tea.Model, msg tea.Msg) tea.Msg {
-		if _, ok := msg.(tea.QuitMsg); ok {
+		switch msg.(type) {
+		case tea.QuitMsg, tea.InterruptMsg:
 			if model, ok := m.(tui.Model); ok && !model.InListState() {
 				return nil
 			}
@@ -45,6 +47,9 @@ func main() {
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithFilter(filter))
 
 	if _, err := p.Run(); err != nil {
+		if err == tea.ErrInterrupted {
+			os.Exit(0)
+		}
 		fmt.Fprintf(os.Stderr, "Error running program: %v\n", err)
 		os.Exit(1)
 	}
