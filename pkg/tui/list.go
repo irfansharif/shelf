@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/irfansharif/shelf/pkg/storage"
 )
@@ -74,15 +75,15 @@ func formatFileSize(bytes int64) string {
 	}
 }
 
-// truncateString truncates a string to the given width, adding ellipsis if needed.
+// truncateString truncates a string to the given display width, adding ellipsis if needed.
 func truncateString(s string, width int) string {
 	if width <= 3 {
 		return s
 	}
-	if len(s) <= width {
+	if runewidth.StringWidth(s) <= width {
 		return s
 	}
-	return s[:width-3] + "..."
+	return runewidth.Truncate(s, width, "...")
 }
 
 // renderArticleItem renders a single article item for the list.
@@ -151,7 +152,7 @@ func renderArticleItem(meta storage.ArticleMeta, selected bool, width int, style
 		sb.WriteString("  ")
 		styledDesc := styles.SelectedDesc.Render(desc)
 		if tagStr != "" {
-			pad := lineWidth - len(desc) - lipgloss.Width(tagStr)
+			pad := lineWidth - lipgloss.Width(desc) - lipgloss.Width(tagStr)
 			if pad < 1 {
 				pad = 1
 			}
@@ -168,7 +169,7 @@ func renderArticleItem(meta storage.ArticleMeta, selected bool, width int, style
 		sb.WriteString("  ")
 		styledDesc := styles.ListItemDesc.Render(desc)
 		if tagStr != "" {
-			pad := lineWidth - len(desc) - lipgloss.Width(tagStr)
+			pad := lineWidth - lipgloss.Width(desc) - lipgloss.Width(tagStr)
 			if pad < 1 {
 				pad = 1
 			}

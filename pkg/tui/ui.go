@@ -1067,7 +1067,7 @@ func (m Model) renderList() string {
 		if i > start {
 			if i == archiveBoundary {
 				// Draw a separator line between non-archived and archived groups.
-				sep := strings.Repeat("─", m.width-6)
+				sep := strings.Repeat("─", m.width-4)
 				sb.WriteString("\n\n")
 				sb.WriteString(m.styles.Muted.Render(sep))
 				sb.WriteString("\n\n")
