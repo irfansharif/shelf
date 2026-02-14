@@ -901,7 +901,7 @@ func (m Model) calcVisibleItems() int {
 	itemHeight := 3
 	visibleItems := listHeight / itemHeight
 	if visibleItems < 1 {
-		visibleItems = 5
+		visibleItems = 1
 	}
 	return visibleItems
 }
@@ -1108,8 +1108,23 @@ func (m Model) View() string {
 
 	// Build the help grid (shown above footer in stateHelp).
 	var helpGrid string
+	var helpGridLines int
 	if m.state == stateHelp {
-		helpGrid = m.renderHelpOverlay()
+		// Calculate how many help grid rows fit in the remaining space.
+		content0 := sb.String()
+		contentHeight0 := strings.Count(content0, "\n") + 1
+		appPaddingV0 := 2
+		footerLines0 := 2
+		// Available lines for the help section (separator + blank + rows).
+		available := m.height - contentHeight0 - appPaddingV0 - footerLines0
+		maxRows := available - 2 // reserve 2 for separator + blank line
+		if maxRows > 6 {
+			maxRows = 6
+		}
+		if maxRows > 0 {
+			helpGrid = m.renderHelpOverlay(maxRows)
+			helpGridLines = maxRows + 2 // rows + separator + blank
+		}
 	}
 
 	// Footer — push to bottom by filling remaining vertical space.
@@ -1117,7 +1132,7 @@ func (m Model) View() string {
 	contentHeight := strings.Count(content, "\n") + 1
 	appPaddingV := 2 // Top + bottom padding from App style
 	footerLines := 2 // Status/blank line + help text
-	remaining := m.height - contentHeight - appPaddingV - footerLines - m.helpGridHeight()
+	remaining := m.height - contentHeight - appPaddingV - footerLines - helpGridLines
 	if remaining > 0 {
 		sb.WriteString(strings.Repeat("\n", remaining))
 	}
@@ -1272,12 +1287,11 @@ func (m Model) helpGridHeight() int {
 	if m.state != stateHelp {
 		return 0
 	}
-	// 6 keybinding rows + 1 separator + 1 blank line after separator
-	// + 5 blank lines above separator for visual breathing room.
-	return 13
+	// 1 separator line + 1 blank line + 6 keybinding rows = 8.
+	return 8
 }
 
-func (m Model) renderHelpOverlay() string {
+func (m Model) renderHelpOverlay(maxRows int) string {
 	type entry struct{ key, desc string }
 
 	col1 := []entry{
@@ -1309,6 +1323,9 @@ func (m Model) renderHelpOverlay() string {
 	}
 	if len(col3) > rows {
 		rows = len(col3)
+	}
+	if maxRows > 0 && rows > maxRows {
+		rows = maxRows
 	}
 
 	// Calculate key display width per column (for alignment).
