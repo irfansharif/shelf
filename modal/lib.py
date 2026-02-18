@@ -14,12 +14,8 @@ from urllib.parse import urlparse
 
 def fetch_html(url, timeout=30):
     """Fetch HTML using curl_cffi with browser TLS impersonation."""
-    import time
-
     from curl_cffi import requests as curl_requests
 
-    print(f"[fetch] fetching with curl_cffi: {url}")
-    t0 = time.perf_counter()
     resp = curl_requests.get(
         url,
         impersonate="chrome",
@@ -31,10 +27,56 @@ def fetch_html(url, timeout=30):
         allow_redirects=True,
     )
     resp.raise_for_status()
-    html = resp.text
-    elapsed = time.perf_counter() - t0
-    print(f"[fetch] done in {elapsed:.1f}s ({len(html)} chars)")
-    return html
+    return resp.text
+
+
+def extract_article_html(raw_html):
+    """Extract article HTML from archive.is snapshots.
+
+    Archive.is renders pages into deeply nested divs with inline CSS
+    grid layout that fragments content across sibling containers.
+    Readability's scoring cannot reassemble these fragments, so we
+    bypass it entirely: find the <article> element, clean it, and
+    return its HTML for direct markdownify conversion.
+
+    Returns the cleaned HTML string, or None if this isn't an
+    archive.is page (caller falls back to readability).
+    """
+    import lxml.html
+
+    # Only activate for archive.is snapshots (identified by their
+    # characteristic wrapper div IDs).
+    if 'id="SOLID"' not in raw_html or 'id="CONTENT"' not in raw_html:
+        return None
+
+    tree = lxml.html.fromstring(raw_html)
+    article = tree.find('.//article')
+    if article is None:
+        return None
+
+    # Remove display:none elements *safely*: preserve .tail text.
+    # Archive.is uses display:none spans for drop-caps whose .tail
+    # holds the actual paragraph text.
+    for el in article.xpath('.//*[contains(@style, "display:none")]'):
+        parent = el.getparent()
+        if parent is None:
+            continue
+        tail = el.tail or ""
+        prev = el.getprevious()
+        if prev is not None:
+            prev.tail = (prev.tail or "") + tail
+        else:
+            parent.text = (parent.text or "") + tail
+        parent.remove(el)
+
+    # Strip non-content elements.
+    for tag in ("button", "svg", "aside", "nav", "footer", "header"):
+        for el in article.findall(f".//{tag}"):
+            parent = el.getparent()
+            if parent is not None:
+                parent.remove(el)
+
+    return lxml.html.tostring(article, encoding="unicode")
 
 
 def extract_metadata(raw_html):

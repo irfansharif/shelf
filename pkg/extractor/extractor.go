@@ -23,7 +23,7 @@ type Extractor struct {
 func New(endpointURL string) *Extractor {
 	return &Extractor{
 		client: &http.Client{
-			Timeout: 5 * time.Minute,
+			Timeout: 1 * time.Minute,
 		},
 		endpointURL: endpointURL,
 	}

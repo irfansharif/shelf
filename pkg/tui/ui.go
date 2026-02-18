@@ -250,8 +250,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.state = stateList
-		m.err = msg.err
-		m.statusMsg = ""
+
+		// If this was a new add (not a reload/refetch), create a scaffolding
+		// article so the user can [R]-refetch it via Safari later.
+		url := strings.TrimSpace(m.urlInput.Value())
+		if url != "" && m.overwritePath == "" {
+			slug := titleFromURL(url)
+			title := fmt.Sprintf("Refetch needed — %s", slug)
+			content := fmt.Sprintf("---\ntitle: %q\nauthor:\nsource: %s\nsaved: %s\ntags:\nprogress:\n---\n\n*Extraction failed — use R to re-fetch via Safari.*\n",
+				title, url, time.Now().Format(time.RFC3339))
+			if err := m.store.SaveContent(title, content, nil); err != nil {
+				m.err = msg.err
+			} else {
+				m.refreshArticles()
+				for i, a := range m.articles {
+					if a.SourceURL == url {
+						m.cursor = i
+						break
+					}
+				}
+				m.scrollPos = clampScroll(m.cursor, m.scrollPos, m.calcVisibleItems(), len(m.articles))
+				m.statusMsg = fmt.Sprintf("Saved placeholder — use [R] to refetch via Safari")
+			}
+		} else {
+			m.err = msg.err
+		}
+		m.overwritePath = ""
+		m.overwriteTitle = ""
 		return m, nil
 
 	case articleDeletedMsg:
@@ -929,6 +954,21 @@ func clampScroll(cursor, scrollPos, visibleItems, totalItems int) int {
 	return scrollPos
 }
 
+// titleFromURL derives an article title from a URL (host + path).
+func titleFromURL(rawURL string) string {
+	u, err := neturl.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	host := u.Hostname()
+	host = strings.TrimPrefix(host, "www.")
+	path := strings.TrimRight(u.Path, "/")
+	if path == "" {
+		return host
+	}
+	return host + path
+}
+
 func (m Model) applyArchiveFilter(articles []storage.ArticleMeta) []storage.ArticleMeta {
 	if m.showArchived {
 		return articles
@@ -1050,9 +1090,9 @@ func (m Model) View() string {
 		sb.WriteString(m.renderList())
 	case stateConfirmOverwrite:
 		if m.pendingResult != nil {
-			sb.WriteString(fmt.Sprintf("Article %q already exists. Overwrite? [y/n]", m.pendingResult.Title))
+			sb.WriteString(fmt.Sprintf("Article %q already exists. Overwrite?", m.pendingResult.Title))
 		} else {
-			sb.WriteString(fmt.Sprintf("Already saved as %q. Re-fetch? [y/n]", m.overwriteTitle))
+			sb.WriteString(fmt.Sprintf("Already saved as %q. Re-fetch?", m.overwriteTitle))
 		}
 	case stateSafariWaiting:
 		sb.WriteString("Safari opened — complete any verification, then press Enter...")
@@ -1087,16 +1127,16 @@ func (m Model) View() string {
 	if m.state == stateConfirmDelete {
 		usable := m.width - 4
 		title := m.pendingDeleteTitle
-		full := fmt.Sprintf("Delete %q? This cannot be undone. [y/n]", title)
+		full := fmt.Sprintf("Delete %q? This cannot be undone.", title)
 		if len(full) > usable && usable > 20 {
-			overhead := len("Delete \"\"? This cannot be undone. [y/n]")
+			overhead := len("Delete \"\"? This cannot be undone.")
 			maxTitle := usable - overhead
 			if maxTitle > 3 {
 				title = truncateString(title, maxTitle)
-				full = fmt.Sprintf("Delete %q? This cannot be undone. [y/n]", title)
+				full = fmt.Sprintf("Delete %q? This cannot be undone.", title)
 			} else {
 				// Title won't fit; drop it entirely.
-				full = "Delete this article? [y/n]"
+				full = "Delete this article?"
 			}
 		}
 		statusLine = m.styles.Error.Render(full)

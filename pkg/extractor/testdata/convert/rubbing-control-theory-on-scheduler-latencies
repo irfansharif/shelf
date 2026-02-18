@@ -10,6 +10,7 @@ source: https://irfansharif.io/blog/rubbing-control-theory-on-scheduler-latencie
 lines 9-20
 ----
 ----
+
 # Rubbing Control Theory On Scheduler Latencies
 
 Laboratory at İstanbul Devlet Mühendislik ve Mimarlık Akademisi (1969-1982).
@@ -21,6 +22,5 @@ Laboratory at İstanbul Devlet Mühendislik ve Mimarlık Akademisi (1969-1982).
 
 ---
 
-For [multi-tenant](https://www.cockroachlabs.com/blog/how-we-built-cockroachdb-serverless/) mixed-workload systems like CockroachDB, performance predictability and isolation
 ----
 ----
