@@ -29,25 +29,40 @@ image = (
 class Converter:
     def _extract(self, raw_html: str):
         """Run readability + markdownify on raw HTML."""
+        import re
+
         from markdownify import markdownify
         from readability import Document
 
-        from lib import extract_article_html, extract_metadata
+        from lib import article_fallback_html, extract_article_html, extract_metadata
 
         title, author = extract_metadata(raw_html)
 
-        # Prefer semantic <article> element (avoids readability mis-scoring
-        # on archive.is and similar deeply-nested pages).
+        # Prefer semantic <article> element for archive.is (avoids
+        # readability mis-scoring on deeply-nested CSS grid pages).
         article_html = extract_article_html(raw_html)
         if article_html is not None:
             markdown = markdownify(article_html, heading_style="ATX")
-        else:
-            doc = Document(raw_html)
-            article_html = doc.summary()
-            markdown = markdownify(article_html, heading_style="ATX")
-            heading = title or doc.short_title()
-            if heading:
-                markdown = f"# {heading}\n\n{markdown}"
+            return title, author, markdown
+
+        doc = Document(raw_html)
+        article_html = doc.summary()
+        markdown = markdownify(article_html, heading_style="ATX")
+        heading = title or doc.short_title()
+        if heading:
+            markdown = f"# {heading}\n\n{markdown}"
+
+        # If the page has a semantic <article> element with significantly
+        # more text than readability extracted, readability likely
+        # mis-scored and picked only a subsection.  Fall back to the
+        # full <article> element.
+        fallback_html, fallback_text_len = article_fallback_html(raw_html)
+        if fallback_html is not None:
+            plain = re.sub(r'[#*\[\]()>|_~`\-]', '', markdown)
+            readability_text_len = len(re.sub(r'\s+', ' ', plain).strip())
+            if readability_text_len < fallback_text_len * 0.5:
+                markdown = markdownify(fallback_html, heading_style="ATX")
+
         return title, author, markdown
 
     def _convert(self, url: str) -> dict:

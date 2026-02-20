@@ -79,6 +79,35 @@ def extract_article_html(raw_html):
     return lxml.html.tostring(article, encoding="unicode")
 
 
+def article_fallback_html(raw_html):
+    """Extract the largest <article> element as a fallback.
+
+    Used when readability mis-scores a page and captures only a fraction
+    of the content (e.g. Chatham House splits article body across sibling
+    divs).  Returns ``(html_str, text_length)`` or ``(None, 0)`` if no
+    suitable element is found.
+    """
+    import lxml.html
+
+    tree = lxml.html.fromstring(raw_html)
+    articles = tree.findall('.//article')
+    if not articles:
+        return None, 0
+
+    article = max(articles, key=lambda el: len(el.text_content()))
+    text_len = len(article.text_content().strip())
+    if text_len < 200:
+        return None, 0
+
+    for tag in ("button", "svg", "aside", "nav", "footer", "header"):
+        for el in article.findall(f".//{tag}"):
+            parent = el.getparent()
+            if parent is not None:
+                parent.remove(el)
+
+    return lxml.html.tostring(article, encoding="unicode"), text_len
+
+
 def extract_metadata(raw_html):
     """Extract title and author from HTML meta tags and headings.
 
